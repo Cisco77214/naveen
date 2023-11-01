@@ -1,0 +1,31 @@
+import maya.cmds as cmds
+
+def controlCreate():
+    polyStore=cmds.ls(selection=True)
+    cmds.ConvertSelectionToUVs()
+    vertexFlatten=cmds.ls(sl=True,fl=True )
+    for uv in vertexFlatten:
+        UVValues = cmds.polyEditUV(uv,query=True )
+        name=uv.split(".")
+        name1=uv.split("[")
+        name2=name1[1].split("]")
+        folliclecreate=cmds.createNode("follicle")
+        objselect=cmds.ls(polyStore,o=True)
+        cmds.connectAttr(objselect[0] + ".outMesh" ,folliclecreate + ".inputMesh")
+        cmds.connectAttr(objselect[0] + ".worldMatrix[0]", folliclecreate + ".inputWorldMatrix")
+        objquery=cmds.listRelatives( folliclecreate, p=True)
+        cmds.connectAttr(folliclecreate + ".outTranslate",objquery[0] + ".translate")
+        cmds.connectAttr(folliclecreate + ".outRotate",objquery[0] + ".rotate")  
+        cmds.setAttr (folliclecreate + ".parameterU" , UVValues[0])
+        cmds.setAttr (folliclecreate + ".parameterV" , UVValues[1])
+        newname=cmds.rename(objquery, (name[0] + "_vtx" + name2[0])) 
+        cmds.select(clear=True)
+        createJoint=cmds.joint(n= (name[0] + "_vtx" + name2[0] + "_skin"),radius =0.1)
+        createControl=cmds.curve (n=("Cube" +(name[0] + "_vtx" + name2[0] + "_ctrl")),d=True ,p=[(0.5,0.5,0.5),(-0.5, 0.5, 0.5,),(-0.5, 0.5, -0.5 ),(0.5, 0.5, -0.5),(0.5, 0.5 ,0.5),(0.5, -0.5, 0.5),(0.5 ,-0.5, -0.5 ),(0.5,0.5 ,-0.5 ),(0.5, -0.5, -0.5 ),(-0.5, -0.5, -0.5 ),( -0.5 ,0.5 ,-0.5), ( -0.5 ,-0.5, -0.5),( -0.5 ,-0.5, 0.5 ),( -0.5, 0.5, 0.5),( -0.5, -0.5, 0.5),(0.5, -0.5 ,0.5)],k= [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15])
+        groupCreate=cmds.group(n= (name[0] + "_vtx" + name2[0] + "_grp"))
+        cmds.setAttr (createControl + ".overrideEnabled",1);
+        cmds.setAttr (createControl + ".overrideColor", 17);
+        cmds.parent( createJoint , createControl )
+        cmds.parentConstraint( newname, groupCreate ,mo=False,w=True)
+        cmds.select(clear=True)
+controlCreate()
