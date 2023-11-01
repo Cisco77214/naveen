@@ -1,0 +1,7 @@
+import maya.cmds as cmds
+each = cmds.ls(sl=1)
+for i in each:
+    jnt = i.replace("ctl", "env")    
+    cmds.connectAttr(i+".translate", jnt+".translate")
+    cmds.connectAttr(i+".rotate", jnt+".rotate")
+    cmds.connectAttr(i+".scale",  jnt+".scale")
