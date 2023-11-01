@@ -1,0 +1,32 @@
+Marupakula Naveen <mnave@redefine.co>
+	
+Fri, 20 Oct, 12:53 (12 days ago)
+	
+to Aravind
+import maya.cmds as cmds
+
+def remove_existing_suffix_and_add_suffix(suffix):
+    selected_objects = cmds.ls(selection=True)
+
+    if len(selected_objects) != 2:
+        print("Please select exactly two objects.")
+        return
+
+    source_object = selected_objects[0]
+    target_object = selected_objects[1]
+
+    source_name = source_object
+    target_name = target_object
+
+    # Remove the existing suffix from the source name
+    if "_" in source_name:
+        source_name = source_name.rsplit('_', 1)[0]
+
+    new_name = source_name + "_" + suffix
+
+    cmds.rename(target_object, new_name)
+    print(f'Renamed {target_name} to {new_name} (source name with added suffix)')
+
+suffix = "Fol"  # Specify the suffix you want to add
+remove_existing_suffix_and_add_suffix(suffix)
+
