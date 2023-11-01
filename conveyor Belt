@@ -1,0 +1,29 @@
+import maya.cmds as cmds
+crv = cmds.ls (sl=1)[0]
+crvShp = cmds.listRelatives (crv, s=True)[0]
+spans = cmds.getAttr (crvShp+'.spans')
+loc = cmds.spaceLocator (n = crv+'_LOC')
+cmds.delete (cmds.parentConstraint(crv, loc))
+cmds.parent (loc, crv)
+cmds.addAttr (crv, ln = 'spin', at = 'double', dv = 0, k = True)
+cmds.addAttr (crv, ln = 'offset', at = 'double', min = 0,max = spans, dv = 0, k = True)
+for c in range (spans):
+	cmds.select (cl=True)
+	jnt = cmds.joint (p = (0,0,0), n=crv+'_'+str(c)+'_Jnt')
+	cmds.select (cl=True)
+	pma = cmds.createNode('plusMinusAverage', n= jnt+'_PMA')
+	con = cmds.createNode('condition', n= jnt+'_CON')
+	poc = cmds.createNode('pointOnCurveInfo', n= jnt+'_POCI')
+	cmds.connectAttr (crvShp+'.worldSpace[0]', poc+'.inputCurve')
+	cmds.setAttr (con+'.operation', 2)
+	cmds.setAttr (con+'.colorIfTrueR', (c-spans))
+	cmds.setAttr (con+'.colorIfFalseR', c)
+	cmds.setAttr (con+'.secondTerm', spans-c)
+	cmds.connectAttr (crv+'.offset',con+'.firstTerm')
+	cmds.connectAttr (con+'.outColorR',pma+'.input1D[0]')
+	cmds.connectAttr (crv+'.offset',pma+'.input1D[1]')
+	cmds.connectAttr (pma+'.output1D',poc+'.parameter')
+	cmds.connectAttr (poc+'.position',jnt+'.translate')
+	if cmds.objExists (crv+'_'+str(c-1)+'_Jnt'):
+		cmds.aimConstraint ((crv+'_'+str(c-1)+'_Jnt'),jnt, aimVector = (1,0,0), upVector = (0,-1,0), worldUpType = 'object', worldUpObject = loc[0])
+cmds.aimConstraint ((crv+'_'+str(c)+'_Jnt'),crv+'_0_Jnt', aimVector = (1,0,0), upVector = (0,-1,0), worldUpType = 'object', worldUpObject = loc[0])
