@@ -1,0 +1,17 @@
+import maya.cmds as cmds
+import maya.mel as mel
+sel = cmds.ls(sl = True)
+sknMsh = sel[0]
+tgtMsh = sel[1:]
+skn = mel.eval('findRelatedSkinCluster ' + sknMsh)
+jnts = cmds.skinCluster(skn, q = True, inf = True)
+cmds.select(cl = True)
+for each in tgtMsh :
+ cmds.select(cl = True)
+ check = mel.eval('findRelatedSkinCluster ' + each)
+ if len(check) != 0 :
+  cmds.delete(check)
+ newSkn = cmds.skinCluster(jnts, each, sm = 0, bm = 0, omi = False, dr = 5, tsb = True)
+ cmds.refresh()
+ cmds.select(sknMsh, each)
+ cmds.copySkinWeights(ss = skn, ds = newSkn[0], sa = "closestPoint", ia = "closestJoint", nm = True, nr = True)
