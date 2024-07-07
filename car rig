@@ -1,0 +1,85 @@
+import maya.cmds as cmds
+
+def create_car_rig(car_body, wheel_names, path_curve):
+    """
+    Create a car rig with automatic wheel setup, rotation, and path following.
+    
+    Parameters:
+    car_body (str): The name of the car body mesh.
+    wheel_names (list): A list of wheel meshes.
+    path_curve (str): The name of the path curve for the car to follow.
+    """
+    if not cmds.objExists(car_body):
+        cmds.warning(f"Car body '{car_body}' not found!")
+        return
+
+    for wheel in wheel_names:
+        if not cmds.objExists(wheel):
+            cmds.warning(f"Wheel '{wheel}' not found!")
+            return
+
+    if not cmds.objExists(path_curve):
+        cmds.warning(f"Path curve '{path_curve}' not found!")
+        return
+    
+    # Group car body and wheels
+    car_group = cmds.group(car_body, wheel_names, name='car_GRP')
+    
+    # Create wheel rotation setup
+    for wheel in wheel_names:
+        rotation_group = cmds.group(wheel, name=f'{wheel}_rotation_GRP')
+        cmds.parent(rotation_group, car_group)
+        
+        # Connect wheel rotation to car movement
+        rotation_attr = f'{wheel}.rotateZ'
+        cmds.expression(name=f'{wheel}_rotate_expr', string=f'{rotation_attr} = -10 * car_CTRL.translateX')
+    
+    # Create path follow setup
+    motion_path = cmds.pathAnimation(car_group, curve=path_curve, follow=True, followAxis='x', upAxis='y', worldUpType='vector', worldUpVector=(0, 1, 0), name='car_motionPath')
+    cmds.cutKey(motion_path + ".uValue", clear=True)
+    cmds.setAttr(motion_path + ".uValue", keyable=True)
+    
+    # Create controls
+    car_ctrl = cmds.circle(name='car_CTRL', radius=3, normal=[0, 1, 0])[0]
+    cmds.group(car_ctrl, name='car_CTRL_GRP')
+    cmds.parentConstraint(car_ctrl, car_group, maintainOffset=True)
+    
+    cmds.select(clear=True)
+    print(f"Car rig created for {car_body}")
+
+def car_rig_ui():
+    """
+    Creates a UI for the car rigging tool.
+    """
+    if cmds.window('carRigUI', exists=True):
+        cmds.deleteUI('carRigUI')
+    
+    window = cmds.window('carRigUI', title='Car Rigging Tool', widthHeight=(300, 200))
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=10, columnAlign='center')
+    
+    cmds.text(label='Car Body')
+    car_body_field = cmds.textField('carBodyField', placeholderText='Enter car body mesh name')
+    
+    cmds.text(label='Wheels (comma separated)')
+    wheel_field = cmds.textField('wheelField', placeholderText='Enter wheel mesh names')
+    
+    cmds.text(label='Path Curve')
+    path_curve_field = cmds.textField('pathCurveField', placeholderText='Enter path curve name')
+    
+    cmds.button(label='Create Car Rig', command=lambda _: execute_car_rig(car_body_field, wheel_field, path_curve_field))
+    
+    cmds.showWindow(window)
+
+def execute_car_rig(car_body_field, wheel_field, path_curve_field):
+    """
+    Executes the car rig creation based on user input from the UI.
+    """
+    car_body = cmds.textField(car_body_field, query=True, text=True)
+    wheels = cmds.textField(wheel_field, query=True, text=True).split(',')
+    wheels = [wheel.strip() for wheel in wheels]  # Clean up any extra spaces
+    path_curve = cmds.textField(path_curve_field, query=True, text=True)
+    
+    create_car_rig(car_body, wheels, path_curve)
+
+# Usage
+car_rig_ui()
