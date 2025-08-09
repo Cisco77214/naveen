@@ -1,0 +1,148 @@
+#########################################################
+#               Curve to Skin Cluster Creator           #
+#-------------------------------------------------------#
+# Author  : Naveen M.
+# Purpose : Automates the process of creating a skin cluster 
+#            from a selected curve. 
+#
+# Usage   : 1. Select a curve.
+#            2. Click the button to run the script.
+#            3. The script will automatically create a 
+#               curve-to-skin-cluster connection.
+#
+# Note: The target mesh must NOT already have a skin 
+#            cluster applied.
+#########################################################
+
+import maya.cmds as cmds
+import math
+import time
+
+# Remove any existing UI window
+if cmds.window("CurveToSkinUI", exists=True):
+    cmds.deleteUI("CurveToSkinUI", window=True)
+
+# UI function
+def createCurveToSkinUI():
+    window = cmds.window("CurveToSkinUI", title="Curve to Skin Tool", widthHeight=(220, 80), sizeable=False, backgroundColor=[0.2, 0.2, 0.2])
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=10)
+    cmds.text(label="Select Curve first, then Mesh", align='center', height=20)
+    cmds.button(label="Convert Curve to Skin", command=lambda x: convertCurveToSkin(), backgroundColor=[0.3, 0.6, 0.3])
+    cmds.showWindow(window)
+
+# Main conversion function
+def convertCurveToSkin():
+    start_time = time.time()
+
+    def findSkinCluster(obj):
+        history = cmds.listHistory(obj)
+        return [node for node in history if cmds.nodeType(node) == "skinCluster"] if history else []
+
+    def findUnlockedJoint(skinCluster):
+        joints = cmds.skinCluster(skinCluster, query=True, influence=True)
+        return [j for j in joints if not cmds.getAttr(j + ".liw")]
+
+    def getVertexWorldPositions(mesh):
+        count = cmds.polyEvaluate(mesh, vertex=True)
+        return [cmds.pointPosition(f"{mesh}.vtx[{i}]", world=True) for i in range(count)]
+
+    # Get selection
+    selection = cmds.ls(selection=True)
+    if len(selection) != 2:
+        cmds.error("Select the curve first, then the mesh.")
+
+    curve, mesh = selection
+
+    # Confirm curve is a valid NURBS curve
+    curveShape = cmds.listRelatives(curve, shapes=True, fullPath=True)
+    if not curveShape or cmds.nodeType(curveShape[0]) != "nurbsCurve":
+        cmds.error("First selected object must be a NURBS curve.")
+
+    # Get skinClusters
+    curveSkin = findSkinCluster(curve)
+    meshSkin = findSkinCluster(mesh)
+
+    if not curveSkin:
+        cmds.error("Curve must be skinned to joints.")
+
+    curveJoints = cmds.skinCluster(curveSkin[0], query=True, influence=True)
+
+    if not meshSkin:
+        if not cmds.objExists("Temp_Hold_Jnt"):
+            cmds.select(clear=True)  # Prevent joint parenting error
+            cmds.joint(name="Temp_Hold_Jnt")
+        cmds.skinCluster("Temp_Hold_Jnt", mesh, toSelectedBones=True)
+        meshSkin = findSkinCluster(mesh)
+
+    # Get the base joint (should be only one unlocked)
+    unlocked = findUnlockedJoint(meshSkin[0])
+    if len(unlocked) != 1:
+        cmds.error("Mesh must have exactly one unlocked joint before conversion.")
+
+    baseJoint = unlocked[0]
+    cmds.setAttr(baseJoint + ".liw", 1)
+
+    # Save original base weights
+    vert_count = cmds.polyEvaluate(mesh, vertex=True)
+    base_weights = [
+        cmds.skinPercent(meshSkin[0], f"{mesh}.vtx[{i}]", transform=baseJoint, query=True)
+        for i in range(vert_count)
+    ]
+
+    # Add curve joints as influences
+    for jnt in curveJoints:
+        if jnt not in cmds.skinCluster(meshSkin[0], query=True, influence=True):
+            cmds.skinCluster(meshSkin[0], edit=True, addInfluence=jnt, lockWeights=False)
+
+    # Create wire deformer
+    wireNode = cmds.wire(mesh, wire=curve, name="TempWire", gw=False, en=1.0, ce=0.0, li=0.0, dds=(0, 1000))[0]
+    cmds.setAttr(wireNode + ".rotation", 0)
+
+    for jnt in curveJoints:
+        # Apply small transform to trigger deformation
+        cmds.select(jnt)
+        cmds.move(1, jnt + ".rotatePivotY", relative=True)
+
+        tempMesh = cmds.duplicate(mesh, name="Temp_Deformed_Mesh")[0]
+
+        cmds.move(-1, jnt + ".rotatePivotY", relative=True)
+
+        # Get world positions before/after deformation
+        original_positions = getVertexWorldPositions(mesh)
+        deformed_positions = getVertexWorldPositions(tempMesh)
+
+        # Compute distances
+        distances = [
+            math.sqrt(sum((a - b) ** 2 for a, b in zip(o, d)))
+            for o, d in zip(original_positions, deformed_positions)
+        ]
+
+        # Set weights based on distance
+        cmds.setAttr(baseJoint + ".liw", 0)
+        for idx, dist in enumerate(distances):
+            if dist > 0:
+                weight = base_weights[idx] * dist
+                cmds.skinPercent(meshSkin[0], f"{mesh}.vtx[{idx}]", transformValue=[(jnt, weight)])
+
+        cmds.delete(tempMesh)
+
+    # Cleanup
+    for jnt in curveJoints:
+        cmds.setAttr(jnt + ".liw", 0)
+
+    cmds.skinCluster(meshSkin[0], edit=True, removeInfluence=baseJoint)
+
+    if cmds.objExists("Temp_Hold_Jnt"):
+        cmds.delete("Temp_Hold_Jnt")
+
+    if cmds.objExists("TempWire"):
+        cmds.delete("TempWire")
+
+    if cmds.objExists(curve + "BaseWire"):
+        cmds.delete(curve + "BaseWire")
+
+    elapsed = round(time.time() - start_time, 2)
+    print(f"? Curve to Skin complete in {elapsed} seconds.")
+
+# Run UI
+createCurveToSkinUI()
