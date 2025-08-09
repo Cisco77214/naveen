@@ -1,0 +1,547 @@
+# --------------------------------------------------------------
+# VN_Magic_Deform_Tool_cmds_only_2.2.py  (Maya 2022–2024, no PyMEL)
+# --------------------------------------------------------------
+#
+# DESCRIPTION:
+#   Convert common deformers (wire/lattice/wrap/curve/cluster/soft selection/blendShape)
+#   into skinCluster weights with minimal clicks.
+#
+# USAGE:
+#   Paste into Maya Script Editor (Python) and run.
+#
+# VERSION HISTORY:
+#   2.2 - Aug 9, 2025 - Pure cmds (no PyMEL), Maya 2022–2024 safe.
+#   2.1 - Aug 9, 2025 - Py3 refresh.
+#   2.0 - Feb 21, 2022 - Initial Release.
+# --------------------------------------------------------------
+
+import math
+import time
+import maya.cmds as cmds
+
+WINDOW_ID = "VN_Magic_Deform_Tool"
+WINDOW_TITLE = "VN Magic Deform Tool"
+
+# ---------- UI cleanup ----------
+if cmds.window(WINDOW_ID, exists=True):
+    cmds.deleteUI(WINDOW_ID, window=True)
+if cmds.windowPref(WINDOW_ID, exists=True):
+    cmds.windowPref(WINDOW_ID, remove=True)
+
+# ---------- Small helpers ----------
+def _skinClusters(obj):
+    """Return list of skinCluster nodes influencing obj."""
+    nodes = []
+    for n in (cmds.listHistory(obj, future=True) or []):
+        if cmds.nodeType(n) == "skinCluster":
+            nodes.append(n)
+    if not nodes:
+        for n in (cmds.listHistory(obj) or []):
+            if cmds.nodeType(n) == "skinCluster":
+                nodes.append(n)
+    return nodes
+
+def _require_selection(n=1, message="Select required objects."):
+    sel = cmds.ls(sl=True) or []
+    if len(sel) < n:
+        cmds.error(message)
+    return sel
+
+def _clear_sel():
+    try:
+        cmds.select(clear=True)
+    except Exception:
+        pass
+
+def _distance(p1, p2):
+    return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)
+
+def _world_vert(mesh, idx):
+    return cmds.xform(f"{mesh}.vtx[{idx}]", q=True, ws=True, t=True)
+
+def _warn(msg):
+    try:
+        cmds.warning(msg)
+    except Exception:
+        print(msg)
+
+def findString():
+    """Guard against temp helper names existing already."""
+    for name in ("CoolForge", "Get_Test_Mesh"):
+        if cmds.objExists(name):
+            cmds.error("Please rename or delete the existing node: {}".format(name))
+
+def NewJnt(position):
+    """Create next NewVish_##_Jnt joint at position."""
+    existing = cmds.ls("NewVish_*_Jnt") or []
+    if not existing:
+        _clear_sel()
+        cmds.joint(n="NewVish_01_Jnt", p=position)
+        return "NewVish_01_Jnt"
+
+    nums = []
+    for n in existing:
+        try:
+            nums.append(int(n.split("_")[1]))
+        except Exception:
+            pass
+    nums = sorted(set(nums)) or [0]
+    next_num = None
+    for i in range(1, nums[-1] + 2):
+        if i not in nums:
+            next_num = i
+            break
+    name = "NewVish_{:02d}_Jnt".format(next_num or (nums[-1] + 1))
+    _clear_sel()
+    cmds.joint(n=name, p=position)
+    return name
+
+# ---------- Core converters ----------
+def SimpleCurveConvert():
+    t0 = time.time()
+    findString()
+
+    sel = _require_selection(2, "Select curve first, then mesh.")
+    crv, mesh = sel[0], sel[1]
+    _clear_sel()
+
+    crv_skins = _skinClusters(crv)
+    mesh_skins = _skinClusters(mesh)
+
+    if not mesh_skins:
+        if not cmds.objExists("New_Nagpal_Jnt"):
+            cmds.joint(n="New_Nagpal_Jnt")
+        cmds.skinCluster("New_Nagpal_Jnt", mesh, tsb=True)
+        mesh_skins = _skinClusters(mesh)
+
+    mesh_infs = cmds.skinCluster(mesh, q=True, inf=True) or []
+    unlocked = [j for j in mesh_infs if not cmds.getAttr(j + ".liw")]
+    if not unlocked:
+        cmds.error("Please unlock one mesh influence (set liw = off).")
+    if len(unlocked) > 1:
+        cmds.error("Please leave only ONE mesh influence unlocked.")
+    hold = unlocked[0]
+    cmds.setAttr(hold + ".liw", 1)
+
+    vtx_count = cmds.polyEvaluate(mesh, v=True)
+    hold_vals = [
+        cmds.skinPercent(mesh_skins[0], f"{mesh}.vtx[{i}]", q=True, t=hold)
+        for i in range(vtx_count)
+    ]
+
+    crv_infs = cmds.skinCluster(crv, q=True, inf=True) or []
+    for j in crv_infs:
+        cmds.skinCluster(mesh, e=True, ai=j, lw=1)
+
+    # wire deformer to get a delta
+    if not cmds.objExists("CoolForge"):
+        cmds.wire(mesh, w=crv, n="CoolForge", gw=False, en=1.0, ce=0.0, li=0.0, dds=(0, 1000))
+    try:
+        cmds.setAttr("CoolForge.rotation", 0)
+    except Exception:
+        pass
+
+    skin = mesh_skins[0]
+
+    for j in crv_infs:
+        cmds.move(1, f"{j}.rotatePivot", y=True, r=True)
+        dup = cmds.duplicate(mesh, n="Get_Test_Mesh")[0]
+        cmds.move(-1, f"{j}.rotatePivot", y=True, r=True)
+
+        dists = [_distance(_world_vert(mesh, i), _world_vert(dup, i)) for i in range(vtx_count)]
+
+        cmds.setAttr(hold + ".liw", 0)
+        for i, w in enumerate(dists):
+            w_add = hold_vals[i] * w
+            if w_add:
+                cmds.skinPercent(skin, f"{mesh}.vtx[{i}]", tv=(j, w_add))
+        cmds.delete(dup)
+
+    for j in crv_infs:
+        try:
+            cmds.setAttr(j + ".liw", 0)
+        except Exception:
+            pass
+    cmds.skinCluster(skin, e=True, ri=hold)
+
+    # cleanup
+    if not crv_skins and cmds.objExists("New_Nagpal_Jnt"):
+        try: cmds.delete("New_Nagpal_Jnt")
+        except Exception: pass
+    for n in ("CoolForge", crv + "BaseWire"):
+        if cmds.objExists(n):
+            try: cmds.delete(n)
+            except Exception: pass
+
+    print("Done in {:.3f}s".format(time.time() - t0))
+
+def ClusterConvert():
+    t0 = time.time()
+    findString()
+
+    sel = cmds.ls(sl=True) or []
+    if len(sel) < 2:
+        cmds.error("Select cluster/handle first, then mesh (mesh last).")
+    mesh = sel[-1]
+
+    hist = cmds.listHistory(sel[0]) or []
+    clust_nodes = [n for n in hist if cmds.nodeType(n) == "cluster"]
+    if not clust_nodes:
+        cmds.error("No_Cluster")
+    try:
+        pos = cmds.getAttr(clust_nodes[0] + ".origin")[0]
+    except Exception:
+        pos = (0.0, 0.0, 0.0)
+
+    if not _skinClusters(mesh):
+        if not cmds.objExists("New_Vishu_Jnt"):
+            cmds.joint(n="New_Vishu_Jnt")
+        cmds.skinCluster("New_Vishu_Jnt", mesh, tsb=True)
+
+    mesh_infs = cmds.skinCluster(mesh, q=True, inf=True) or []
+    cmds.setAttr(mesh_infs[0] + ".liw", 1)
+
+    # Nudge cluster to generate delta
+    cmds.select(sel[:-1], r=True)
+    cmds.move(1, y=True, r=True)
+    dup = cmds.duplicate(mesh, n="Get_Test_Mesh")[0]
+    cmds.move(-1, y=True, r=True)
+
+    vtx_count = cmds.polyEvaluate(mesh, v=True)
+    dists = [_distance(_world_vert(mesh, i), _world_vert(dup, i)) for i in range(vtx_count)]
+
+    new_jnt = "NewVish_01_Jnt" if not cmds.objExists("NewVish_01_Jnt") else NewJnt(pos)
+    if new_jnt == "NewVish_01_Jnt" and not cmds.objExists("NewVish_01_Jnt"):
+        cmds.joint(n="NewVish_01_Jnt", p=pos)
+        new_jnt = "NewVish_01_Jnt"
+
+    cmds.skinCluster(mesh, e=True, ai=new_jnt, lw=1)
+
+    cmds.setAttr(mesh_infs[0] + ".liw", 0)
+    skin = _skinClusters(mesh)[0]
+    for i, w in enumerate(dists):
+        if w:
+            cmds.skinPercent(skin, f"{mesh}.vtx[{i}]", tv=(new_jnt, w))
+    cmds.delete(dup)
+
+    print("Done in {:.3f}s".format(time.time() - t0))
+
+def SoftConvert():
+    t0 = time.time()
+    findString()
+
+    sel = _require_selection(1, "Select mesh components with Soft Selection enabled.")
+    if not cmds.softSelect(q=True, sse=True):
+        cmds.error("No_SoftSelection")
+
+    # find transform from component/mesh
+    mesh_hist = cmds.listHistory(sel[0]) or []
+    shapes = [n for n in mesh_hist if cmds.nodeType(n) == "mesh"]
+    if not shapes:
+        cmds.error("Select a mesh or mesh component.")
+    shape = shapes[0]
+    cmds.select(shape)
+    cmds.pickWalk(d="up")
+    trans = cmds.ls(sl=True)[0]
+    _clear_sel()
+
+    if not _skinClusters(trans):
+        if not cmds.objExists("New_VishHold_Jnt"):
+            cmds.joint(n="New_VishHold_Jnt")
+        cmds.skinCluster("New_VishHold_Jnt", trans, tsb=True)
+    skin = _skinClusters(trans)[0]
+
+    # temporary cluster to read origin
+    clust, handle = cmds.cluster(sel[0], n="VishClust")
+    try:
+        pos = cmds.getAttr(handle + "Shape.origin")[0]
+    except Exception:
+        pos = (0.0, 0.0, 0.0)
+    cmds.delete(clust)
+
+    if cmds.objExists("NewVish_01_Jnt"):
+        new_jnt = NewJnt(pos)
+    else:
+        cmds.joint(n="NewVish_01_Jnt", p=pos)
+        new_jnt = "NewVish_01_Jnt"
+
+    cmds.skinCluster(trans, e=True, ai=new_jnt, lw=1, wt=0)
+
+    mesh_infs = cmds.skinCluster(trans, q=True, inf=True) or []
+    cmds.setAttr(mesh_infs[0] + ".liw", 1)
+
+    cmds.select(sel, r=True)
+    cmds.move(1, y=True, r=True)
+    dup = cmds.duplicate(trans, n="Get_Test_Mesh")[0]
+    cmds.move(-1, y=True, r=True)
+
+    vtx_count = cmds.polyEvaluate(trans, v=True)
+    dists = [_distance(_world_vert(trans, i), _world_vert(dup, i)) for i in range(vtx_count)]
+
+    cmds.setAttr(mesh_infs[0] + ".liw", 0)
+    for i, w in enumerate(dists):
+        if w:
+            cmds.skinPercent(skin, f"{trans}.vtx[{i}]", tv=(new_jnt, w))
+    cmds.delete(dup)
+
+    print("Done in {:.3f}s".format(time.time() - t0))
+
+def WrapCurveWireLatticeConvet():
+    t0 = time.time()
+    findString()
+
+    sel = _require_selection(2, "Select deformer driver first, then mesh.")
+    driver, mesh = sel[0], sel[1]
+
+    def _wire_nodes(obj):
+        return [n for n in (cmds.listHistory(obj) or []) if cmds.nodeType(n) == "wire"]
+
+    saved_rot = None
+    wnodes = _wire_nodes(mesh)
+    if wnodes:
+        try:
+            saved_rot = cmds.getAttr(wnodes[0] + ".rotation")
+            if saved_rot:
+                cmds.setAttr(wnodes[0] + ".rotation", 0.0)
+        except Exception:
+            pass
+
+    mesh_skins = _skinClusters(mesh)
+    drv_skins  = _skinClusters(driver)
+
+    if not drv_skins:
+        cmds.error("No skin on driver/deformer.")
+
+    if mesh_skins:
+        mesh_skins = list(mesh_skins)
+        for n in drv_skins:
+            if n in mesh_skins:
+                mesh_skins.remove(n)
+    if not mesh_skins:
+        if not cmds.objExists("New_Vishu_Jnt"):
+            cmds.joint(n="New_Vishu_Jnt")
+        cmds.skinCluster("New_Vishu_Jnt", mesh, tsb=True)
+        mesh_skins = _skinClusters(mesh)
+
+    mesh_infs = cmds.skinCluster(mesh, q=True, inf=True) or []
+    cmds.setAttr(mesh_infs[0] + ".liw", 1)
+
+    drv_infs = cmds.skinCluster(driver, q=True, inf=True) or []
+    for j in drv_infs:
+        if j not in mesh_infs:
+            cmds.skinCluster(mesh, e=True, ai=j, lw=1)
+
+    vtx_count = cmds.polyEvaluate(mesh, v=True)
+    skin = mesh_skins[0]
+
+    for j in drv_infs:
+        cmds.move(1, f"{j}.rotatePivot", y=True, r=True)
+        dup = cmds.duplicate(mesh, n="Get_Test_Mesh")[0]
+        cmds.move(-1, f"{j}.rotatePivot", y=True, r=True)
+
+        dists = [_distance(_world_vert(mesh, i), _world_vert(dup, i)) for i in range(vtx_count)]
+
+        cmds.setAttr(mesh_infs[0] + ".liw", 0)
+        for i, w in enumerate(dists):
+            if w:
+                cmds.skinPercent(skin, f"{mesh}.vtx[{i}]", tv=(j, w))
+        cmds.delete(dup)
+
+    if saved_rot is not None and _wire_nodes(mesh):
+        try:
+            cmds.setAttr(_wire_nodes(mesh)[0] + ".rotation", saved_rot)
+        except Exception:
+            pass
+
+    print("Done in {:.3f}s".format(time.time() - t0))
+
+def BlendShapeConvert():
+    t0 = time.time()
+    findString()
+
+    trans = _require_selection(1, "Select mesh with a blendShape.")[0]
+    bs_nodes = [n for n in (cmds.listHistory(trans) or []) if cmds.nodeType(n) == "blendShape"]
+    if not bs_nodes:
+        cmds.error("No_BlendShape")
+    bs = bs_nodes[0]
+
+    if not _skinClusters(trans):
+        if not cmds.objExists("New_Vishu_Jnt"):
+            cmds.joint(n="New_Vishu_Jnt")
+        cmds.skinCluster("New_Vishu_Jnt", trans, tsb=True)
+    skin = _skinClusters(trans)[0]
+
+    mesh_inf = (cmds.skinCluster(trans, q=True, inf=True) or [None])[0]
+    if mesh_inf:
+        cmds.setAttr(mesh_inf + ".liw", 1)
+
+    weights = cmds.listAttr(bs + ".w", m=True) or []
+    if not weights:
+        cmds.error("BlendShape has no targets.")
+    first_w = weights[0]
+
+    cmds.setAttr(bs + "." + first_w, 1)
+    dup = cmds.duplicate(trans, n="Get_Test_Mesh")[0]
+    cmds.setAttr(bs + "." + first_w, 0)
+
+    vtx_count = cmds.polyEvaluate(trans, v=True)
+    if not cmds.objExists("NewVish_01_Jnt"):
+        cmds.joint(n="NewVish_01_Jnt")
+        new_jnt = "NewVish_01_Jnt"
+    else:
+        new_jnt = NewJnt((0.0, 0.0, 0.0))
+
+    cmds.skinCluster(trans, e=True, ai=new_jnt, lw=1)
+
+    dists = []
+    maxd = 0.0
+    for i in range(vtx_count):
+        d = _distance(_world_vert(trans, i), _world_vert(dup, i))
+        dists.append(d)
+        if d > maxd:
+            maxd = d
+    maxd = max(maxd, 1e-12)
+
+    if mesh_inf:
+        cmds.setAttr(mesh_inf + ".liw", 0)
+
+    for i, d in enumerate(dists):
+        if d:
+            cmds.skinPercent(skin, f"{trans}.vtx[{i}]", tv=(new_jnt, d / maxd))
+
+    cmds.delete(dup)
+    print("Done in {:.3f}s".format(time.time() - t0))
+
+# ---------- UI ----------
+try:
+    window = cmds.window(WINDOW_ID, t=WINDOW_TITLE, sizeable=False, widthHeight=(300, 433), bgc=(0.1, 0.1, 0.01))
+    form = cmds.formLayout(numberOfDivisions=100)
+    Text = cmds.text(l="Just One Click!", h=20, w=80)
+
+    Wire = cmds.iconTextButton("WireBase", ann="Wire to skin convert", style="iconAndTextHorizontal",
+                               image1="wire.png", c="wireButton()", label="Wire to Skin", w=200, h=35, bgc=(0.21, 0.42, 0.3))
+    Lattice = cmds.iconTextButton("LatticeBase", ann="Lattice to skin convert", style="iconAndTextHorizontal",
+                                  image1="lattice.png", c="latticeButton()", l="Lattice to Skin", w=200, h=35, bgc=(0.21, 0.42, 0.3))
+    shape = cmds.iconTextButton("shapeBase", ann="BlendShape to skin convert", style="iconAndTextHorizontal",
+                                image1="blendShape.png", c="blendShapeButton()", l="BlendShape to Skin", w=200, h=35, bgc=(0.21, 0.42, 0.3))
+    Wrap = cmds.iconTextButton("wrapBase", ann="Wrap to skin convert", style="iconAndTextHorizontal",
+                               image1="wrap.png", c="wrapButton()", l="Wrap to Skin", w=200, h=35, bgc=(0.21, 0.42, 0.3))
+    Cluster = cmds.iconTextButton("ClusterBase", ann="Cluster to skin convert", style="iconAndTextHorizontal",
+                                  image1="cluster.png", c="clusterButton()", l="Cluster to Skin", w=200, h=35, bgc=(0.21, 0.42, 0.3))
+    SoftS = cmds.iconTextButton("SoftSBase", ann="Soft Selection to skin convert", style="iconAndTextHorizontal",
+                                image1="sculptPinch.png", c="SoftButton()", l="Soft Selection to Skin", w=200, h=35, bgc=(0.21, 0.42, 0.3))
+    Curve = cmds.iconTextButton("CurveBase", ann="Curve to skin convert", style="iconAndTextHorizontal",
+                                image1="curveEP.png", c="CurveButton()", l="Curve to Skin", w=200, h=45, bgc=(0.8, 0.8, 0.5))
+
+    setingWire = cmds.symbolButton(i="menuIconHelp.png", h=30, w=30,
+        ann="Select wire first and then Mesh.\n\n(Wire should have all skinned joints.\nJoints should not have any connection.)")
+    setingLatt = cmds.symbolButton(i="menuIconHelp.png", h=30, w=30,
+        ann="Select lattice first and then Mesh.\n\n(Lattice should have all skinned joints.\nJoints should not have any connection.)")
+    setingShap = cmds.symbolButton(i="menuIconHelp.png", h=30, w=30,
+        ann="Select blendShape.\n\n(Mesh should have only one blendShape on it at a time.)")
+    setingWrap = cmds.symbolButton(i="menuIconHelp.png", h=30, w=30,
+        ann="Select SourceMesh then WrapMesh.\n\n(SourceMesh should have all skinned joints.\nJoints should not have any connection.)")
+    setingClst = cmds.symbolButton(i="menuIconHelp.png", h=30, w=30, ann="Select cluster first then Mesh.")
+    setingSoft = cmds.symbolButton(i="menuIconHelp.png", h=30, w=30, ann="Create Soft Selection.\n\n(select one cluster at a time.)")
+    setingCurv = cmds.symbolButton(i="menuIconHelp.png", h=30, w=30,
+        ann="Select curve first and then Mesh.\n\n(Curve should have all skinned joints.\nJoints should not have any connection.)")
+
+    cmds.formLayout(
+        form, edit=True,
+        attachForm=[
+            (Text, "top", 5),
+            (Wire, "top", 40),
+            (Lattice, "top", 90),
+            (shape, "top", 140),
+            (Wrap, "top", 190),
+            (Cluster, "top", 240),
+            (SoftS, "top", 290),
+            (Curve, "top", 342),
+            (setingWire, "top", 40),
+            (setingLatt, "top", 90),
+            (setingShap, "top", 140),
+            (setingWrap, "top", 190),
+            (setingClst, "top", 240),
+            (setingSoft, "top", 295),
+            (setingCurv, "top", 348),
+        ],
+        attachControl=[(Text, "bottom", 30, Wire)],
+        attachPosition=[
+            (Text, "right", 10, 65),
+            (Wire, "right", 0, 75),
+            (Lattice, "right", 0, 75),
+            (shape, "right", 0, 75),
+            (Wrap, "right", 0, 75),
+            (Cluster, "right", 0, 75),
+            (SoftS, "right", 0, 75),
+            (Curve, "right", 0, 75),
+            (setingWire, "left", 20, 75),
+            (setingLatt, "left", 20, 75),
+            (setingShap, "left", 20, 75),
+            (setingWrap, "left", 20, 75),
+            (setingClst, "left", 20, 75),
+            (setingSoft, "left", 20, 75),
+            (setingCurv, "left", 20, 75),
+        ],
+    )
+
+    cmds.showWindow(window)
+except Exception as e:
+    _warn("UI build failed: {}".format(e))
+
+# ---------- Button wrappers ----------
+def _has_history_node(obj, type_name):
+    return any(cmds.nodeType(n) == type_name for n in (cmds.listHistory(obj) or []))
+
+def latticeButton():
+    sel = cmds.ls(sl=True) or []
+    if len(sel) < 2 or not _has_history_node(sel[1], "lattice"):
+        cmds.error("No_Lattice")
+    WrapCurveWireLatticeConvet()
+    print("Lattice OK")
+
+def wireButton():
+    sel = cmds.ls(sl=True) or []
+    if len(sel) < 2 or not _has_history_node(sel[1], "wire"):
+        cmds.error("No_Wire")
+    WrapCurveWireLatticeConvet()
+    print("Wire OK")
+
+def wrapButton():
+    sel = cmds.ls(sl=True) or []
+    if len(sel) < 2 or not _has_history_node(sel[1], "wrap"):
+        cmds.error("No_Wrap")
+    WrapCurveWireLatticeConvet()
+    print("Wrap OK")
+
+def blendShapeButton():
+    sel = cmds.ls(sl=True) or []
+    if len(sel) < 1 or not _has_history_node(sel[0], "blendShape"):
+        cmds.error("No_BlendShape")
+    BlendShapeConvert()
+    print("BlendShape OK")
+
+def clusterButton():
+    sel = cmds.ls(sl=True) or []
+    if len(sel) < 2 or not _has_history_node(sel[-1], "cluster"):
+        cmds.error("No_Cluster")
+    ClusterConvert()
+    print("Cluster OK")
+
+def SoftButton():
+    sel = cmds.ls(sl=True) or []
+    if not sel or not cmds.softSelect(q=True, sse=True) or cmds.nodeType(sel[0]) != "mesh":
+        cmds.error("No_SoftSelection")
+    SoftConvert()
+    print("SoftSelection OK")
+
+def CurveButton():
+    # validate: curve then mesh
+    cmds.pickWalk(d="down")
+    sel = cmds.ls(sl=True) or []
+    cmds.pickWalk(d="up")
+    if len(sel) < 2 or not (cmds.nodeType(sel[0]) == "nurbsCurve" and cmds.nodeType(sel[1]) == "mesh"):
+        cmds.error("No_Curve")
+    SimpleCurveConvert()
+    print("Curve OK")
+# ------------------------------- end -------------------------------
