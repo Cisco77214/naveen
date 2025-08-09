@@ -1,0 +1,628 @@
+# Ribbonizer 2.1 – nicer, dockable UI (Maya 2022+)
+# - Keeps all rig logic from your script
+# - New PySide2 UI: dockable, grouped, tooltips, live validation, presets menu
+# - Falls back to cmds UI if PySide2 is unavailable
+#
+# If you only want the old cmds window, set USE_QT_UI = False below.
+
+import maya.OpenMaya as om
+import maya.cmds as mc
+
+# ---- Py3 compatibility for izip ----
+try:
+    from itertools import izip  # Py2
+except ImportError:
+    izip = zip  # Py3 fallback
+
+USE_QT_UI = True
+
+# ---------- core helpers (unchanged behavior) ----------
+
+def get_bbox_center(obj):
+    shapes = mc.listRelatives(obj, s=True)  # get bb of the shape in case there are children
+    cvs = []
+    for shape in shapes:
+        num_of_cvs = mc.getAttr(shape + ".controlPoints", size=True)
+        cvs.append("{}.cv[0:{}]".format(shape, num_of_cvs - 1))
+    bbmin = mc.exactWorldBoundingBox(cvs)[:3]
+    bbmax = mc.exactWorldBoundingBox(cvs)[3:7]
+    mid_point = [(b_max + b_min) / 2 for b_min, b_max in izip(bbmin, bbmax)]
+    return mid_point
+
+
+def make_fk_ctrls(prefix, num_of_ctrls):
+    fk_ctrls = ctrl_maker(prefix, ctrl_type="circle", count=num_of_ctrls - 1, deg=3, sp=8, name="fk")
+    fk_ctrl_off_grps = [mc.group(fk_ctrl, n=fk_ctrl + "_offset") for fk_ctrl in fk_ctrls]
+    [mc.xform(fk_ctrl_off_grp, piv=(0, 0, 0), os=True) for fk_ctrl_off_grp in fk_ctrl_off_grps]
+    for (o, f) in izip(fk_ctrl_off_grps[1:], fk_ctrls[:-1]):
+        mc.parent(o, f)
+    return fk_ctrls, fk_ctrl_off_grps
+
+
+def ctrl_maker(prefix, ctrl_type, count, deg, sp, name=""):
+    if ctrl_type == "cube":
+        c1 = mc.curve(
+            p=[(-1.0, 1.0, 1.0), (-1.0, 1.0, -1.0), (1.0, 1.0, -1.0),
+               (1.0, 1.0, 1.0), (-1.0, 1.0, 1.0), (-1.0, -1.0, 1.0),
+               (1.0, -1.0, 1.0), (1.0, -1.0, -1.0), (-1.0, -1.0, -1.0),
+               (-1.0, -1.0, 1.0), (-1.0, -1.0, -1.0), (-1.0, 1.0, -1.0),
+               (1.0, 1.0, -1.0), (1.0, -1.0, -1.0), (1.0, -1.0, 1.0), (1.0, 1.0, 1.0)],
+            k=list(range(16)), d=1
+        )
+    elif ctrl_type == "sphere":
+        c1 = mc.circle(d=deg, s=sp, nr=(1, 0, 0), r=1, ch=0)[0]
+        c2 = mc.circle(d=deg, s=sp, nr=(0, 1, 0), r=1, ch=0)[0]
+        c3 = mc.circle(d=deg, s=sp, nr=(0, 0, 1), r=1, ch=0)[0]
+        mc.parent(mc.listRelatives(c2, s=True), mc.listRelatives(c3, s=True), c1, r=True, s=True)
+        mc.delete(c2, c3)
+    elif ctrl_type == "circle":
+        c1 = mc.circle(d=deg, s=sp, nr=(1, 0, 0), r=1, ch=0)[0]
+    else:
+        raise ValueError("Unknown ctrl_type")
+
+    if name:
+        name = name + "_"
+
+    ctrls = [c1]
+    for _ in range(count - 1):
+        ctrls.append(mc.duplicate(c1, rr=True)[0])
+
+    for x, ctrl in enumerate(ctrls):
+        ctrls[x] = mc.rename(ctrl, "{}{}ctrl_{:02d}".format(prefix, name, x + 1))
+        shapes = mc.listRelatives(ctrls[x], f=True, s=True) or []
+        for y, shape in enumerate(shapes):
+            mc.rename(shape, "{}Shape{:02d}".format(ctrls[x], y + 1))
+
+    mc.select(cl=True)
+    return ctrls
+
+
+def lock_hide(objs, attrs):
+    for obj in objs:
+        for attr in attrs:
+            mc.setAttr(obj + attr, l=True, k=False, cb=False)
+
+
+def param_from_length(curve, count, curve_type="open", space="uv", normalized=True):
+    if curve_type == "periodic":
+        divider = count
+    else:
+        divider = count - 1
+    if divider == 0:
+        divider = 1
+
+    dag = om.MDagPath()
+    obj = om.MObject()
+    crv = om.MSelectionList()
+    crv.add(curve)
+    crv.getDagPath(0, dag, obj)
+
+    curve_fn = om.MFnNurbsCurve(dag)
+    length = curve_fn.length()
+    param = [curve_fn.findParamFromLength(i * ((1 / float(divider)) * length)) for i in range(count)]
+
+    if space == "world":
+        data = []
+        space_k = om.MSpace.kWorld
+        point = om.MPoint()
+        for p in param:
+            curve_fn.getPointAtParam(p, point, space_k)
+            data.append([point[0], point[1], point[2]])
+    elif normalized is True:
+        def normalizer(value, old_range, new_range):
+            return (value - old_range[0]) * (new_range[1] - new_range[0]) / (old_range[1] - old_range[0]) + new_range[0]
+        max_v = mc.getAttr(curve + ".minMaxValue.maxValue")
+        min_v = mc.getAttr(curve + ".minMaxValue.minValue")
+        data = [normalizer(p, [min_v, max_v], [0, 1]) for p in param]
+    else:
+        data = param
+
+    return data
+
+
+def set_color(objects, color):
+    color_dict = {"blue": 6, "red": 13, "green": 14, "mid_blue": 15, "yellow": 22, "light_green": 23}
+
+    def set_one(o):
+        shapes = mc.listRelatives(o, f=True, s=True)
+        if shapes:
+            for shape in shapes:
+                mc.setAttr(shape + ".ove", 1)
+                mc.setAttr(shape + ".ovc", color_dict[color])
+        else:
+            mc.setAttr(o + ".ove", 1)
+            mc.setAttr(o + ".ovc", color_dict[color])
+
+    if isinstance(objects, list):
+        for obj in objects:
+            set_one(obj)
+    else:
+        set_one(objects)
+
+
+def get_selection():
+    sel = mc.ls(sl=True)
+    if not sel:
+        mc.warning("Select a NURBS surface to ribbonize")
+        return
+    shapes = mc.listRelatives(sel[0], s=True, f=True)
+    if shapes and mc.objectType(shapes[0]) == "nurbsSurface":
+        return sel[0]
+    elif mc.objectType(sel[0]) in ("makeNurbPlane", "makeNurbCylinder"):
+        return mc.listConnections(sel[0] + ".outputSurface", d=True, s=False)[0]
+    else:
+        mc.warning("That isn't a NURBS surface")
+        return
+
+
+def ribbonize(surf_tr, equal=1, num_of_ctrls=5, num_of_jnts=29, prefix="", constrain=1, add_fk=0, wire=0):
+    attrs = [".tx", ".ty", ".tz", ".rx", ".ry", ".rz", ".sx", ".sy", ".sz", ".v"]
+    if not prefix:
+        mc.warning("Please enter a prefix")
+        return
+    prefix = prefix + "_"
+
+    # prepare surface
+    surf_tr = mc.rename(surf_tr, prefix + "ribbon_surface")
+    surf = mc.listRelatives(surf_tr, shapes=True)[0]
+    mc.makeIdentity(surf_tr, t=True, r=True, s=True, apply=True)
+    mc.delete(surf_tr, ch=True)
+
+    u_curve = mc.duplicateCurve(surf_tr + ".v[.5]", local=True, ch=0)[0]
+    v_curve = mc.duplicateCurve(surf_tr + ".u[.5]", local=True, ch=0)[0]
+    mc.delete(surf_tr, ch=True)
+
+    u_length = mc.arclen(u_curve)
+    v_length = mc.arclen(v_curve)
+    if u_length < v_length:
+        mc.reverseSurface(surf_tr, d=3, ch=False, rpo=True)
+        mc.reverseSurface(surf_tr, d=0, ch=False, rpo=True)
+
+    parameter = ".parameterU"
+    other_param = ".parameterV"
+    u_curve_corr = mc.duplicateCurve(surf_tr + ".v[.5]", local=True, ch=0)[0]
+
+    # open vs periodic
+    if mc.getAttr(surf + ".formU") == 2 or mc.getAttr(surf + ".formV") == 2:
+        curve_type = "periodic"
+        divider_for_ctrls = num_of_ctrls
+    else:
+        curve_type = "open"
+        divider_for_ctrls = num_of_ctrls - 1
+
+    param_ctrls = param_from_length(u_curve_corr, num_of_ctrls, curve_type, "uv")
+    param_joints = param_from_length(u_curve_corr, num_of_jnts, curve_type, "uv")
+    length = mc.arclen(u_curve_corr)
+    mc.delete(u_curve, v_curve, u_curve_corr)
+
+    # groups
+    final_group = mc.group(n=prefix + "ribbon_grp", em=True)
+    ctrl_joints_grp = mc.group(n=prefix + "ctrl_joints_grp", em=True)
+    ctrl_grp = mc.group(n=prefix + "ctrls_grp", em=True)
+    follicles_grp = mc.group(n=prefix + "follicles_grp", em=True)
+    rig_grp = mc.group(n=prefix + "rig_grp", em=True)
+    main_ctrl = mc.circle(n=prefix + "ctrl_main", nr=(0, 1, 0), r=length / 5, ch=0)[0]
+    main_ctrl_offset = mc.group(n=prefix + "ctrl_main_offset", em=True)
+    mc.parent(main_ctrl, main_ctrl_offset)
+    mc.parent(ctrl_grp, main_ctrl)
+    mc.parent(main_ctrl_offset, rig_grp, final_group)
+    mc.parent(surf_tr, ctrl_joints_grp, follicles_grp, rig_grp)
+
+    # center main ctrl offset
+    mid_point = get_bbox_center(surf_tr)
+    for attr, mid_pnt_el in izip(attrs[:3], mid_point):
+        mc.setAttr(main_ctrl_offset + attr, mid_pnt_el)
+
+    # follicles & bind joints
+    fols = []
+    fols_tr = []
+    bind_jnts = []
+    bnd_joints_rad = (length / 60) / (float(num_of_jnts) / 40)
+    for x in range(num_of_jnts):
+        fol = mc.createNode("follicle")
+        mc.setAttr(fol + ".visibility", 0)
+        temp_fol = mc.listRelatives(fol, p=True)[0]
+        fols_tr.append(mc.rename(temp_fol, "{}follicle_{:02d}".format(prefix, x + 1)))
+        fols.append(mc.listRelatives(fols_tr[-1], s=True)[0])
+        mc.connectAttr(fols[-1] + ".outTranslate", fols_tr[-1] + ".translate", f=True)
+        mc.connectAttr(fols[-1] + ".outRotate", fols_tr[-1] + ".rotate", f=True)
+        mc.connectAttr(surf + ".worldMatrix[0]", fols[-1] + ".inputWorldMatrix")
+        mc.connectAttr(surf + ".local", fols[-1] + ".inputSurface")
+        mc.setAttr(fols[-1] + parameter, param_joints[x])
+        mc.setAttr(fols[-1] + other_param, 0.5)
+        mc.parent(fols_tr[-1], follicles_grp)
+        bind_jnts.append(mc.createNode("joint", n="{}bnd_jnt_{:02d}".format(prefix, x + 1)))
+        mc.parent(bind_jnts[-1], fols_tr[-1], r=True)
+        mc.setAttr(bind_jnts[-1] + ".radius", bnd_joints_rad)
+    set_color(bind_jnts, "mid_blue")
+
+    # temp follicles for control placement
+    temp_fols = []
+    temp_fols_tr = []
+    for _ in range(num_of_ctrls):
+        temp_fols.append(mc.createNode("follicle"))
+        temp_fols_tr.append(mc.listRelatives(temp_fols[-1], p=True)[0])
+        mc.connectAttr(temp_fols[-1] + ".outTranslate", temp_fols_tr[-1] + ".translate", f=True)
+        mc.connectAttr(temp_fols[-1] + ".outRotate", temp_fols_tr[-1] + ".rotate", f=True)
+        mc.connectAttr(surf + ".worldMatrix[0]", temp_fols[-1] + ".inputWorldMatrix")
+        mc.connectAttr(surf + ".local", temp_fols[-1] + ".inputSurface")
+
+    if equal:
+        for x, temp_fol in enumerate(temp_fols):
+            mc.setAttr(temp_fol + parameter, param_ctrls[x])
+            mc.setAttr(temp_fol + other_param, 0.5)
+    else:
+        v = 0
+        for temp_fol in temp_fols:
+            mc.setAttr(temp_fol + parameter, v)
+            mc.setAttr(temp_fol + other_param, 0.5)
+            v = v + (1.0 / divider_for_ctrls)
+
+    # ctrls & ctrl joints
+    controls = ctrl_maker(prefix, ctrl_type="cube", count=num_of_ctrls, deg=3, sp=8)
+    ctrl_ofs_grps, ctrl_joints, ctrl_jnt_ofs_grps = [], [], []
+    ctrl_joints_rad = bnd_joints_rad * 2
+    ik_ctrl_scale = (length / 35) / (float(num_of_ctrls) / 5)
+
+    for x, ctrl in enumerate(controls):
+        ctrl_ofs_grp = mc.group(ctrl, n="{}_offset".format(ctrl))
+        mc.delete(mc.parentConstraint(temp_fols_tr[x], ctrl_ofs_grp))
+        ctrl_ofs_grps.append(ctrl_ofs_grp)
+        for ctrl_shape in mc.listRelatives(ctrl, s=True) or []:
+            ctrl_cvs_count = mc.getAttr(ctrl_shape + ".controlPoints", size=True)
+            mc.scale(ik_ctrl_scale, ik_ctrl_scale, ik_ctrl_scale,
+                     "{}.cv[0:{}]".format(ctrl_shape, ctrl_cvs_count - 1), r=True, ocp=True)
+        ctrl_joints.append(mc.createNode("joint", n="{}ctrl_jnt_{:02d}".format(prefix, x + 1)))
+        mc.setAttr(ctrl_joints[x] + ".radius", ctrl_joints_rad)
+        ctrl_jnt_ofs_grp = mc.group(ctrl_joints[-1], n="{}_offset".format(ctrl_joints[-1]))
+        mc.delete(mc.parentConstraint(temp_fols_tr[x], ctrl_jnt_ofs_grp))
+        ctrl_jnt_ofs_grps.append(ctrl_jnt_ofs_grp)
+
+    set_color(controls, "green")
+    set_color(ctrl_joints, "red")
+    mc.parent(ctrl_ofs_grps, ctrl_grp)
+    mc.parent(ctrl_jnt_ofs_grps, ctrl_joints_grp)
+    lock_hide(ctrl_ofs_grps, attrs[:9])
+    lock_hide(ctrl_jnt_ofs_grps, attrs[:9])
+    mc.delete(temp_fols_tr)
+
+    if constrain == 0:
+        for (c, j) in izip(controls, ctrl_joints):
+            for attr in attrs[:7]:
+                mc.connectAttr(c + attr, j + attr)
+        mc.parentConstraint(main_ctrl, ctrl_joints_grp, mo=True)
+        mc.scaleConstraint(main_ctrl, ctrl_joints_grp)
+        for flt in fols_tr:
+            mc.connectAttr(main_ctrl + ".sx", flt + ".sx")
+            mc.connectAttr(main_ctrl + ".sx", flt + ".sy")
+            mc.connectAttr(main_ctrl + ".sx", flt + ".sz")
+    else:
+        for (c, j) in izip(controls, ctrl_joints):
+            mc.parentConstraint(c, j)
+            mc.scaleConstraint(c, j)
+        for flt in fols_tr:
+            mc.scaleConstraint(main_ctrl, flt)
+
+    if wire and num_of_ctrls > 1:
+        temp_crv = mc.duplicateCurve(surf_tr + ".v[.5]", n=prefix + "wire_crv", local=False, ch=0)[0]
+        degree = 1 if num_of_ctrls == 2 else 3
+        wire_crv = mc.curve(p=param_from_length(temp_crv, num_of_ctrls + (num_of_ctrls - 1), "open", "world"), d=degree)
+        mc.delete(temp_crv)
+        wire_crv = mc.rename(wire_crv, prefix + "wire_crv")
+        mc.delete(wire_crv, ch=True)
+        wire_node = mc.wire(surf_tr, gw=False, en=1.0, ce=0.0, li=0.0, dds=(0, 50), w=wire_crv, n=prefix + "wire")[0]
+        mc.connectAttr(main_ctrl + ".sx", wire_node + ".scale[0]")
+        cps = param_from_length(wire_crv, num_of_ctrls, "open", "uv", normalized=False)
+        for cp in cps:
+            mc.select("{}.u[{}]".format(wire_crv, cp), r=True)
+            mc.dropoffLocator(1.0, 1.0, wire_node)
+        mc.select(cl=True)
+        for x, ctrl in enumerate(controls):
+            mc.connectAttr(ctrl + ".rx", "{}.wireLocatorTwist[{}]".format(wire_node, x))
+        wire_grp = mc.group(wire_crv, wire_crv + "BaseWire", n=prefix + "wire_crv_grp")
+        mc.parent(wire_grp, rig_grp)
+        lock_hide([wire_grp], attrs[:9])
+        mc.skinCluster(ctrl_joints, wire_crv, dr=2, mi=2, bm=0)
+    else:
+        skin = mc.skinCluster(ctrl_joints, surf_tr, dr=2, mi=num_of_ctrls - 1, ns=num_of_ctrls * 5, bm=0,
+                              n=prefix + "skinCluster")[0]
+        mc.skinPercent(skin, surf_tr, pruneWeights=0.2)
+    if wire and num_of_ctrls == 1:
+        mc.warning("wire skipped. at least 2 controls needed")
+
+    mc.setAttr(surf_tr + ".v", 0)
+    mc.setAttr(rig_grp + ".v", 0)
+    mc.connectAttr(main_ctrl + ".sx", main_ctrl + ".sy")
+    mc.connectAttr(main_ctrl + ".sx", main_ctrl + ".sz")
+    mc.aliasAttr("Scale", main_ctrl + ".sx")
+    set_color(main_ctrl, "yellow")
+    mc.connectAttr(main_ctrl_offset + ".sx", main_ctrl_offset + ".sy")
+    mc.connectAttr(main_ctrl_offset + ".sx", main_ctrl_offset + ".sz")
+    mc.aliasAttr("Scale", main_ctrl_offset + ".sx")
+    lock_hide([final_group, follicles_grp, ctrl_joints_grp, surf_tr, ctrl_grp, rig_grp], attrs[:9])
+    lock_hide([ctrl_grp, main_ctrl, main_ctrl_offset], attrs[7:])
+    lock_hide(controls, attrs[7:])
+    mc.select(cl=True)
+    bind_jnts_set = mc.sets(n=prefix + "bind_jnts_set")
+    mc.sets(bind_jnts, add=bind_jnts_set)
+    mc.select(cl=True)
+    ik_ctrls_set = mc.sets(n=prefix + "ik_ctrls_set")
+    mc.sets(controls, add=ik_ctrls_set)
+    mc.select(cl=True)
+    controls_set = mc.sets(n=prefix + "controls_set")
+    mc.sets(main_ctrl, ik_ctrls_set, add=controls_set)
+
+    if add_fk and mc.getAttr(surf + ".formU") != 2 and mc.getAttr(surf + ".formV") != 2:
+        fk_ctrls, fk_ctrl_off_grps = make_fk_ctrls(prefix, num_of_ctrls)
+        mc.parent(fk_ctrl_off_grps[0], ctrl_grp)
+        fk_ctrl_scale = (length / 35) / (float(num_of_ctrls) / 5) * 2
+        for fk_ctrl in fk_ctrls:
+            for fk_ctrl_shape in mc.listRelatives(fk_ctrl, s=True) or []:
+                fk_ctrl_cvs_count = mc.getAttr(fk_ctrl_shape + ".controlPoints", size=True)
+                mc.scale(fk_ctrl_scale, fk_ctrl_scale, fk_ctrl_scale,
+                         "{}.cv[0:{}]".format(fk_ctrl_shape, fk_ctrl_cvs_count - 1), r=True, ocp=True)
+        mc.select(cl=True)
+        fk_ctrls_set = mc.sets(n=prefix + "fk_ctrls_set")
+        mc.sets(fk_ctrls, add=fk_ctrls_set)
+        ik_ctrl_constr_grps = [mc.group(ctrl, n=ctrl + "_constr_grp") for ctrl in controls]
+        [mc.xform(ik_ctrl_constr_grp, piv=(0, 0, 0), os=True) for ik_ctrl_constr_grp in ik_ctrl_constr_grps]
+        for ik, fk in izip(controls[:-1], fk_ctrl_off_grps):
+            mc.delete(mc.parentConstraint(ik, fk))
+        for fk, ik in izip(fk_ctrls, ik_ctrl_constr_grps[:-1]):
+            mc.parentConstraint(fk, ik)
+        mc.parentConstraint(fk_ctrls[-1], ik_ctrl_constr_grps[-1], mo=True)
+        lock_hide(ik_ctrl_constr_grps, [".tx", ".ty", ".tz", ".rx", ".ry", ".rz", ".sx", ".sy", ".sz"])
+        set_color(fk_ctrls, "blue")
+        lock_hide(fk_ctrl_off_grps, [".tx", ".ty", ".tz", ".rx", ".ry", ".rz", ".sx", ".sy", ".sz"])
+        mc.sets(fk_ctrls_set, add=controls_set)
+        mc.select(cl=True)
+    elif add_fk and (mc.getAttr(surf + ".formU") == 2 or mc.getAttr(surf + ".formV") == 2):
+        mc.warning("surface is periodic. fk controls skipped")
+
+    # Message attrs
+    mc.addAttr(main_ctrl, ln="joints", at="message")
+    mc.addAttr(main_ctrl, ln="follicles", at="message")
+    mc.addAttr(main_ctrl, ln="surface", at="message")
+    if not mc.attributeQuery("i_am_the_surface", node=surf, exists=True):
+        mc.addAttr(surf, ln="i_am_the_surface", at="message")
+    mc.connectAttr(main_ctrl + ".surface", surf + ".i_am_the_surface")
+    for j, f in izip(bind_jnts, fols):
+        mc.addAttr(j, ln="i_am_a_joint", at="message")
+        mc.addAttr(f, ln="i_am_a_follicle", at="message")
+        mc.connectAttr(main_ctrl + ".joints", j + ".i_am_a_joint")
+        mc.connectAttr(main_ctrl + ".follicles", f + ".i_am_a_follicle")
+
+
+# ---------- Pretty Qt UI (dockable) ----------
+
+def _launch_cmds_fallback():
+    # Old simple window as a fallback
+    windowName = "ribbonizer_window"
+    if mc.window(windowName, ex=True):
+        mc.deleteUI(windowName)
+        mc.windowPref(windowName, remove=True)
+    mainWindow = mc.window(windowName, t="Ribbonizer 2.1", s=False, mnb=False, mxb=False)
+    mainFormL = mc.formLayout()
+    prefixText = mc.text(l="Prefix:")
+    prefixField = mc.textField("prefix", tx="spine")
+    numCtrlsText = mc.text(l="Controls:")
+    numCtrlsField = mc.intField("num_of_ctrls", min=1, v=5, step=1)
+    numJntsText = mc.text(l="Joints:")
+    numJntsField = mc.intField("num_of_jnts", min=1, v=29, step=1)
+    equalCheckbox = mc.checkBox("equal", l="Equal spacing", v=True)
+    constrCheckbox = mc.checkBox("constrain", l="Constrain", v=True)
+    wireCheckbox = mc.checkBox("wire", l="Wire deformer", v=False)
+    fkCheckbox = mc.checkBox("add_fk", l="Add FK", v=False)
+    def _go(*args):
+        sel = get_selection()
+        if not sel: return
+        ribbonize(sel,
+                  mc.checkBox(equalCheckbox, q=True, v=True),
+                  mc.intField(numCtrlsField, q=True, v=True),
+                  mc.intField(numJntsField, q=True, v=True),
+                  mc.textField(prefixField, q=True, tx=True),
+                  mc.checkBox(constrCheckbox, q=True, v=True),
+                  mc.checkBox(fkCheckbox, q=True, v=True),
+                  mc.checkBox(wireCheckbox, q=True, v=True))
+    ribbonizeBtn = mc.button(l="Ribbonize", c=_go, h=35, bgc=(0.3,0.55,0.3))
+    mc.formLayout(mainFormL, e=True,
+                  attachForm=[(prefixText,"left",16),(numCtrlsText,"left",16),(numJntsText,"left",16),
+                              (prefixText,"top",16),(ribbonizeBtn,"bottom",12),(ribbonizeBtn,"left",12),(ribbonizeBtn,"right",12)],
+                  attachControl=[(numCtrlsText,"top",10,prefixText),(numJntsText,"top",10,numCtrlsText),
+                                 (prefixField,"top",12,prefixText),(numCtrlsField,"top",6,prefixField),(numJntsField,"top",6,numCtrlsField),
+                                 (equalCheckbox,"top",12,numJntsField),(constrCheckbox,"top",6,equalCheckbox),
+                                 (wireCheckbox,"top",6,constrCheckbox),(fkCheckbox,"top",6,wireCheckbox),
+                                 (prefixField,"left",90,prefixText),(numCtrlsField,"left",90,numCtrlsText),(numJntsField,"left",90,numJntsText),
+                                 (ribbonizeBtn,"top",12,fkCheckbox)])
+    mc.showWindow(mainWindow)
+
+
+def launch_ui():
+    if not USE_QT_UI:
+        _launch_cmds_fallback()
+        return
+    try:
+        from maya import OpenMayaUI as omui
+        try:
+            from shiboken2 import wrapInstance
+        except Exception:
+            from shiboken2 import wrapInstance  # in case of namespace quirks
+        from PySide2 import QtWidgets, QtCore, QtGui
+    except Exception:
+        # PySide2 not available -> fallback
+        _launch_cmds_fallback()
+        return
+
+    def maya_main_window():
+        ptr = omui.MQtUtil.mainWindow()
+        return wrapInstance(int(ptr), QtWidgets.QWidget)
+
+    class RibbonizerUI(QtWidgets.QWidget):
+        TITLE = "Ribbonizer 2.1"
+
+        def __init__(self, parent=None):
+            super(RibbonizerUI, self).__init__(parent)
+            self.setObjectName("Ribbonizer21")
+            self.setWindowTitle(self.TITLE)
+            self.setMinimumWidth(370)
+            self._build()
+            self._style()
+            self._connect()
+
+        def _build(self):
+            # Top banner
+            self.banner = QtWidgets.QLabel("Ribbonizer")
+            self.banner.setAlignment(QtCore.Qt.AlignCenter)
+
+            # Inputs
+            self.prefix = QtWidgets.QLineEdit("spine")
+            self.prefix.setPlaceholderText("prefix (e.g., spine)")
+            self.ctrls = QtWidgets.QSpinBox()
+            self.ctrls.setRange(1, 200); self.ctrls.setValue(5)
+            self.jnts = QtWidgets.QSpinBox()
+            self.jnts.setRange(1, 400); self.jnts.setValue(29)
+            self.equal = QtWidgets.QCheckBox("Equal spacing"); self.equal.setChecked(True)
+            self.constrain = QtWidgets.QCheckBox("Constrain (parent+scale)"); self.constrain.setChecked(True)
+            self.wire = QtWidgets.QCheckBox("Use wire deformer")
+            self.addfk = QtWidgets.QCheckBox("Add FK layer")
+
+            # Tooltips
+            self.prefix.setToolTip("Name prefix for created nodes and sets.")
+            self.ctrls.setToolTip("Number of IK controls that ride the ribbon.")
+            self.jnts.setToolTip("Number of bind joints on the surface.")
+            self.equal.setToolTip("Evenly distribute controls along ribbon length.")
+            self.constrain.setToolTip("Use constraints instead of direct connections.")
+            self.wire.setToolTip("Drive surface with a wire curve instead of skinCluster.")
+            self.addfk.setToolTip("Add an FK chain to drive IK controls.")
+
+            # Presets
+            self.preset = QtWidgets.QComboBox()
+            self.preset.addItems(["Custom", "Spine (5 ctrls / 29 jnts)", "Neck (3 / 9)", "Tail (6 / 25)"])
+
+            # Buttons
+            self.btn = QtWidgets.QPushButton("Ribbonize")
+            self.btn.setCursor(QtCore.Qt.PointingHandCursor)
+            self.btn.setMinimumHeight(36)
+
+            # Layouts
+            form = QtWidgets.QFormLayout()
+            form.setLabelAlignment(QtCore.Qt.AlignRight)
+            form.addRow("Preset:", self.preset)
+            form.addRow("Prefix:", self.prefix)
+
+            grid = QtWidgets.QGridLayout()
+            grid.addWidget(QtWidgets.QLabel("Controls:"), 0, 0)
+            grid.addWidget(self.ctrls, 0, 1)
+            grid.addWidget(QtWidgets.QLabel("Joints:"), 0, 2)
+            grid.addWidget(self.jnts, 0, 3)
+
+            opts = QtWidgets.QVBoxLayout()
+            opts.addWidget(self.equal)
+            opts.addWidget(self.constrain)
+            opts.addWidget(self.wire)
+            opts.addWidget(self.addfk)
+
+            # Frames
+            frameDims = QtWidgets.QGroupBox("Counts")
+            frameDims.setLayout(grid)
+            frameOpts = QtWidgets.QGroupBox("Options")
+            frameOpts.setLayout(opts)
+
+            main = QtWidgets.QVBoxLayout(self)
+            main.addWidget(self.banner)
+            main.addLayout(form)
+            main.addWidget(frameDims)
+            main.addWidget(frameOpts)
+            main.addStretch(1)
+            main.addWidget(self.btn)
+
+        def _style(self):
+            # Tweaked to sit nicely in Maya dark UI
+            self.banner.setStyleSheet("""
+            QLabel {
+                font: 700 16px "Segoe UI";
+                padding: 6px;
+                border-radius: 6px;
+                background: #3b3f45;
+                color: #e6e6e6;
+            }""")
+            self.setStyleSheet("""
+            QGroupBox {
+                border: 1px solid #50555a;
+                border-radius: 6px;
+                margin-top: 8px;
+                color: #d0d0d0;
+                font-weight: 600;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px; top: -6px;
+                padding: 0 2px;
+                background-color: #2f3338;
+            }
+            QLineEdit, QSpinBox, QComboBox {
+                background: #2b2f34; border:1px solid #454a50; border-radius:4px;
+                color:#e0e0e0; padding:3px 6px;
+            }
+            QCheckBox { color:#cfcfcf; }
+            QPushButton {
+                border: 1px solid #67a06b; border-radius: 6px; padding: 6px 10px;
+                background: #3a5f3e; color: #e9f2ea; font-weight: 700;
+            }
+            QPushButton:hover { background: #417245; }
+            QPushButton:pressed { background: #355e3a; }
+            """)
+
+        def _connect(self):
+            self.btn.clicked.connect(self._run)
+            self.preset.currentIndexChanged.connect(self._preset_changed)
+
+        def _preset_changed(self, idx):
+            if idx == 1:   # Spine
+                self.prefix.setText("spine"); self.ctrls.setValue(5); self.jnts.setValue(29)
+            elif idx == 2: # Neck
+                self.prefix.setText("neck"); self.ctrls.setValue(3); self.jnts.setValue(9)
+            elif idx == 3: # Tail
+                self.prefix.setText("tail"); self.ctrls.setValue(6); self.jnts.setValue(25)
+
+        def _run(self):
+            # quick validation + helpful prompts
+            if not self.prefix.text().strip():
+                mc.warning("Please enter a prefix")
+                self.prefix.setFocus()
+                return
+            sel = get_selection()
+            if not sel:
+                mc.inViewMessage(amg="<hl>Ribbonizer:</hl> Select a NURBS surface first.", pos="midCenter", fade=True, atk=0.6)
+                return
+            ribbonize(
+                sel,
+                1 if self.equal.isChecked() else 0,
+                int(self.ctrls.value()),
+                int(self.jnts.value()),
+                self.prefix.text().strip(),
+                1 if self.constrain.isChecked() else 0,
+                1 if self.addfk.isChecked() else 0,
+                1 if self.wire.isChecked() else 0
+            )
+            mc.inViewMessage(amg="<hl>Ribbon built:</hl> {}  ({} ctrls / {} jnts)".format(
+                self.prefix.text().strip(), int(self.ctrls.value()), int(self.jnts.value())
+            ), pos="topCenter", fade=True, alpha=0.9, bkc=0x303530)
+
+    # Dock into workspace if possible
+    ctrl_name = "Ribbonizer21WorkspaceCtrl"
+    if mc.workspaceControl(ctrl_name, q=True, exists=True):
+        mc.deleteUI(ctrl_name)
+    widget = RibbonizerUI(maya_main_window())
+    mc.workspaceControl(ctrl_name, label=widget.TITLE, retain=False)
+    qt_ptr = omui.MQtUtil.findControl(ctrl_name)
+    if qt_ptr:
+        from shiboken2 import wrapInstance
+        from PySide2 import QtWidgets
+        ctrl = wrapInstance(int(qt_ptr), QtWidgets.QWidget)
+        ctrl.layout().addWidget(widget)
+
+# ---------- run ----------
+
+if __name__ == "__main__":
+    launch_ui()
