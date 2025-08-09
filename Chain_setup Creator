@@ -1,0 +1,261 @@
+#########################################################
+#                  Chain_setup Creator                   #
+#-------------------------------------------------------#
+# Author   : Naveen M.
+# Purpose  : Select a curve, click the button, and 
+#            automatically create an Chain_setup.
+# Created  : 
+# Note     :  Curve need to be closed 
+#########################################################
+
+import maya.cmds as cmds
+
+WIN = "CurveToJointsUI"
+
+def _shape_of(node):
+    shapes = cmds.listRelatives(node, s=True, ni=True) or []
+    return shapes[0] if shapes else None
+
+def _is_curve(node):
+    shp = _shape_of(node)
+    return shp and cmds.nodeType(shp) in ("nurbsCurve",)
+
+def _pick_one(title="Select"):
+    sel = cmds.ls(sl=True) or []
+    return sel[0] if sel else None
+
+def _get_spans(curve):
+    shp = _shape_of(curve)
+    if not shp:
+        raise RuntimeError("Selected object has no shape.")
+    if cmds.nodeType(shp) != "nurbsCurve":
+        raise RuntimeError("Selected object is not a NURBS curve.")
+    return cmds.getAttr(shp + ".spans"), shp
+
+def _safe_delete(nodes):
+    existing = [n for n in nodes if cmds.objExists(n)]
+    if existing:
+        cmds.delete(existing)
+
+def build_from_ui(*_):
+    # Gather UI values
+    curve = cmds.textFieldButtonGrp(WIN+"_curveTFB", q=True, text=True)
+    prefix = cmds.textFieldGrp(WIN+"_prefixTF", q=True, text=True).strip()
+    use_spans = cmds.checkBox(WIN+"_useSpansCB", q=True, v=True)
+    count = cmds.intField(WIN+"_countIF", q=True, v=True)
+    aim = [cmds.floatField(WIN+"_aimX", q=True, v=True),
+           [cmds.floatField(WIN+"_aimY", q=True, v=True)][0],
+           [cmds.floatField(WIN+"_aimZ", q=True, v=True)][0]]
+    # The above was too clever—just read properly:
+    aim = [cmds.floatField(WIN+"_aimX", q=True, v=True),
+           cmds.floatField(WIN+"_aimY", q=True, v=True),
+           cmds.floatField(WIN+"_aimZ", q=True, v=True)]
+    up  = [cmds.floatField(WIN+"_upX",  q=True, v=True),
+           cmds.floatField(WIN+"_upY",  q=True, v=True),
+           cmds.floatField(WIN+"_upZ",  q=True, v=True)]
+    parent_loc = cmds.checkBox(WIN+"_parentLocCB", q=True, v=True)
+    world_up_obj = cmds.textFieldButtonGrp(WIN+"_wuTFB", q=True, text=True).strip()
+
+    if not curve or not cmds.objExists(curve):
+        cmds.warning("Pick a curve first.")
+        return
+    if not _is_curve(curve):
+        cmds.warning("Selected node is not a NURBS curve.")
+        return
+
+    spans, crvShp = _get_spans(curve)
+    j_count = spans if use_spans else max(1, count)
+    if not prefix:
+        prefix = curve
+
+    # Names
+    loc_name = f"{prefix}_LOC"
+    offset_attr = "offset"
+    spin_attr   = "spin"
+
+    # Clean old stuff from re-runs (optional but helpful)
+    existing_joints = [j for j in cmds.ls(prefix+"_*_Jnt") if cmds.objExists(j)]
+    _safe_delete(existing_joints)
+    if cmds.objExists(loc_name):
+        _safe_delete([loc_name])
+
+    cmds.undoInfo(openChunk=True)
+    try:
+        # Build locator and align to curve
+        loc = cmds.spaceLocator(n=loc_name)[0]
+        cmds.delete(cmds.parentConstraint(curve, loc))
+        if parent_loc:
+            cmds.parent(loc, curve)
+
+        # Add attributes to curve (create if missing)
+        if not cmds.objExists(f"{curve}.{spin_attr}"):
+            cmds.addAttr(curve, ln=spin_attr, at='double', dv=0, k=True)
+        if not cmds.objExists(f"{curve}.{offset_attr}"):
+            # Clamp max to spans for your original logic, even if using manual count
+            cmds.addAttr(curve, ln=offset_attr, at='double', min=0, max=spans, dv=0, k=True)
+
+        # Make joints and hook up pointOnCurve + math like your script
+        prev_j = None
+        joints = []
+        for c in range(j_count):
+            jnt = cmds.createNode("joint", n=f"{prefix}_{c}_Jnt")
+            joints.append(jnt)
+            pma = cmds.createNode('plusMinusAverage', n=f"{jnt}_PMA")
+            con = cmds.createNode('condition', n=f"{jnt}_CON")
+            poc = cmds.createNode('pointOnCurveInfo', n=f"{jnt}_POCI")
+
+            cmds.connectAttr(crvShp+'.worldSpace[0]', poc+'.inputCurve', f=True)
+            cmds.setAttr(con+'.operation', 2)  # Greater Than
+            cmds.setAttr(con+'.colorIfTrueR', (c - spans))
+            cmds.setAttr(con+'.colorIfFalseR', c)
+            cmds.setAttr(con+'.secondTerm', spans - c)
+
+            cmds.connectAttr(curve+'.'+offset_attr, con+'.firstTerm', f=True)
+            cmds.connectAttr(con+'.outColorR', pma+'.input1D[0]', f=True)
+            cmds.connectAttr(curve+'.'+offset_attr, pma+'.input1D[1]', f=True)
+            cmds.connectAttr(pma+'.output1D', poc+'.parameter', f=True)
+            cmds.connectAttr(poc+'.position', jnt+'.translate', f=True)
+
+            # Aim down the chain toward the previous joint (to mimic your original pass)
+            if prev_j and cmds.objExists(prev_j):
+                cmds.aimConstraint(prev_j, jnt,
+                                   aimVector=aim,
+                                   upVector=up,
+                                   worldUpType='object',
+                                   worldUpObject=loc)
+            prev_j = jnt
+
+        # Final aim back to first joint (matches your last line)
+        if joints:
+            cmds.aimConstraint(joints[-1], joints[0],
+                               aimVector=aim,
+                               upVector=up,
+                               worldUpType='object',
+                               worldUpObject=loc)
+
+        # Create/refresh a live slider connection group so UI Offset drives the attr
+        # (UI elements exist outside DG; we’ll keep them in sync via a scriptJob)
+        _ensure_offset_scriptJob(curve, offset_attr)
+
+        # Feedback
+        cmds.select(joints, r=True)
+        cmds.inViewMessage(amg=f"<hl>Built {len(joints)} joints</hl> on <hl>{curve}</hl>", pos="midCenter", fade=True)
+
+    except Exception as e:
+        cmds.warning("Build failed: {}".format(e))
+        raise
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+def _ensure_offset_scriptJob(curve, offset_attr):
+    """Keeps the UI slider synced to curve.offset and vice versa."""
+    # Kill old jobs we started for this window so we don't leak them
+    jobs = cmds.scriptJob(lj=True) or []
+    for j in jobs:
+        if "CurveToJointsUI" in j:  # name tag in our jobs
+            try:
+                jid = int(j.split(":")[0])
+                cmds.scriptJob(kill=jid, f=True)
+            except:
+                pass
+
+    # One job to push UI->attr when user changes slider
+    def _push_from_slider(*_):
+        if not (cmds.objExists(curve) and cmds.attributeQuery(offset_attr, n=curve, ex=True)):
+            return
+        val = cmds.floatSliderGrp(WIN+"_offsetFSG", q=True, v=True)
+        try:
+            cmds.setAttr(f"{curve}.{offset_attr}", val)
+        except:
+            pass
+
+    # Wire change command
+    if cmds.control(WIN+"_offsetFSG", q=True, ex=True):
+        cmds.floatSliderGrp(WIN+"_offsetFSG", e=True, dc=_push_from_slider, cc=_push_from_slider)
+
+    # Another job to pull attr->UI when attr changes
+    if cmds.objExists(curve) and cmds.attributeQuery(offset_attr, n=curve, ex=True):
+        def _pull_to_ui():
+            try:
+                val = cmds.getAttr(f"{curve}.{offset_attr}")
+                if cmds.control(WIN+"_offsetFSG", q=True, ex=True):
+                    cmds.floatSliderGrp(WIN+"_offsetFSG", e=True, v=val)
+            except:
+                pass
+
+        # attrChange job (tag name so we can clean)
+        cmds.scriptJob(ac=[f"{curve}.{offset_attr}", _pull_to_ui], protected=True, kws=True, compressUndo=True, ro=True, parent=WIN)
+
+        # Initialize UI with current attr value
+        _pull_to_ui()
+
+def _pick_curve(*_):
+    picked = _pick_one("Pick Curve")
+    if picked and _is_curve(picked):
+        cmds.textFieldButtonGrp(WIN+"_curveTFB", e=True, text=picked)
+    elif picked:
+        cmds.warning("Selection is not a NURBS curve.")
+
+def _pick_worldUp(*_):
+    picked = _pick_one("Pick World Up Object")
+    if picked:
+        cmds.textFieldButtonGrp(WIN+"_wuTFB", e=True, text=picked)
+
+def _toggle_count(*_):
+    use = cmds.checkBox(WIN+"_useSpansCB", q=True, v=True)
+    cmds.intField(WIN+"_countIF", e=True, en=not use)
+
+def _sync_offset_max(*_):
+    # When a curve is typed/picked, adjust the slider max to that curve's spans
+    curve = cmds.textFieldButtonGrp(WIN+"_curveTFB", q=True, text=True).strip()
+    if curve and cmds.objExists(curve) and _is_curve(curve):
+        spans, _ = _get_spans(curve)
+        cmds.floatSliderGrp(WIN+"_offsetFSG", e=True, max=spans)
+
+def show():
+    if cmds.window(WIN, q=True, ex=True):
+        cmds.deleteUI(WIN)
+
+    cmds.window(WIN, t="Curve → Joints Rig")
+    col = cmds.columnLayout(adj=True, rs=6)
+
+    cmds.textFieldButtonGrp(WIN+"_curveTFB", l="Curve", bl="Pick", bc=_pick_curve, cw3=[60, 260, 60])
+    cmds.textFieldGrp(WIN+"_prefixTF", l="Prefix", tx="", cw2=[60, 260])
+
+    row = cmds.rowLayout(nc=2, cw2=[150, 160], adj=2)
+    cmds.checkBox(WIN+"_useSpansCB", l="Use Curve Spans", v=True, cc=_toggle_count)
+    cmds.intField(WIN+"_countIF", v=10, en=False)  # disabled when using spans
+    cmds.setParent("..")
+
+    cmds.frameLayout(l="Aim / Up Vectors", cll=True, cl=False, mw=6, mh=6, bgs=True)
+    r1 = cmds.rowLayout(nc=6, adj=6)
+    cmds.text(l="Aim", w=40)
+    cmds.floatField(WIN+"_aimX", v=1.0, pre=3, w=60)
+    cmds.floatField(WIN+"_aimY", v=0.0, pre=3, w=60)
+    cmds.floatField(WIN+"_aimZ", v=0.0, pre=3, w=60)
+    cmds.setParent("..")
+    r2 = cmds.rowLayout(nc=6, adj=6)
+    cmds.text(l="Up", w=40)
+    cmds.floatField(WIN+"_upX", v=0.0, pre=3, w=60)
+    cmds.floatField(WIN+"_upY", v=-1.0, pre=3, w=60)
+    cmds.floatField(WIN+"_upZ", v=0.0, pre=3, w=60)
+    cmds.setParent("..")
+    cmds.setParent("..")
+
+    cmds.textFieldButtonGrp(WIN+"_wuTFB", l="World Up Obj", bl="Pick", bc=_pick_worldUp, cw3=[90, 230, 60], text="")
+    cmds.checkBox(WIN+"_parentLocCB", l="Parent Locator under Curve", v=True)
+
+    cmds.separator(h=6, st="in")
+    cmds.floatSliderGrp(WIN+"_offsetFSG", l="Offset", field=True, min=0, max=10, v=0.0)  # max will sync to spans on pick
+
+    cmds.separator(h=10, st="in")
+    cmds.button(l="Build Rig", h=32, c=build_from_ui, bgc=(0.35, 0.6, 0.35))
+
+    # Hook up events
+    cmds.textFieldButtonGrp(WIN+"_curveTFB", e=True, cc=lambda *_: _sync_offset_max())
+    _sync_offset_max()
+
+    cmds.showWindow(WIN)
+
+# Launch the UI
+show()
