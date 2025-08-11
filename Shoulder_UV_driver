@@ -1,0 +1,53 @@
+## uv driver shoulder
+
+
+import maya.cmds as cmds
+def createUvDriver():
+    hipJt=cmds.ls('Shoulder_L')
+    jointParent=cmds.listRelatives(hipJt,p=True)
+    nurbsPl=cmds.nurbsPlane (p= [0, 0, 0], ax= [1, 0, 0], w= 200, lr= 1, d= 3, u= 1, v =1, ch= False,n='nurbsplane_Shoulder_L')[0]
+    nurbShape=cmds.listRelatives(nurbsPl,s=True)[0]
+    cmds.pointConstraint(hipJt,nurbsPl,offset=[0,0,0],w=1,n='tmp')
+    cmds.delete ('tmp')
+    ##cmds.orientConstraint(hipJt,nurbsPl,offset=[0,0,0],w=1,n='tmp')
+    #cmds.delete ('tmp')
+    cmds.makeIdentity (nurbsPl, apply=True, t= True, r= True, s= True, n= False, pn= True)
+    loc=cmds.spaceLocator (p= [0, 0, 0],n='loc_Shoulder_L')[0]
+    cmds.pointConstraint('Elbow_L',loc,offset=[0,0,0],w=1,)
+    cmds.geometryConstraint(nurbsPl,loc,w=1,)
+    cmds.parentConstraint (jointParent,nurbsPl,mo=True, w= 1)
+    cmds.scaleConstraint (jointParent,nurbsPl,mo=True, w= 1)
+    cposNode=cmds.createNode ("closestPointOnSurface",n='cpos_Shoulder_L')
+    cmds.connectAttr (str(nurbShape)+'.worldSpace[0]', str(cposNode)+'.inputSurface',f=True)
+    cmds.connectAttr (str(loc)+'.translate', str(cposNode)+'.inPosition',f=True)
+    grp=cmds.group (em=True,w=True,n='L_Shoulder_uvd_grp')
+    cmds.parent(nurbsPl,loc,grp)
+    cmds.setAttr(grp+'.visibility',0)
+    if cmds.objExists('baseNoTrans_grp'):
+        cmds.parent(grp,'baseNoTrans_grp')
+    
+
+    hipJt=cmds.ls('Shoulder_R')
+    jointParent=cmds.listRelatives(hipJt,p=True)
+    nurbsPl=cmds.nurbsPlane (p= [0, 0, 0], ax= [1, 0, 0], w= 200, lr= 1, d= 3, u= 1, v =1, ch= False,n='nurbsplane_Shoulder_R')[0]
+    nurbShape=cmds.listRelatives(nurbsPl,s=True)[0]
+    cmds.pointConstraint(hipJt,nurbsPl,offset=[0,0,0],w=1,n='tmp')
+    cmds.delete ('tmp')
+    #cmds.orientConstraint(hipJt,nurbsPl,offset=[0,0,0],w=1,n='tmp')
+    #cmds.delete ('tmp')
+    cmds.makeIdentity (nurbsPl, apply=True, t= True, r= True, s= True, n= False, pn= True)
+    loc=cmds.spaceLocator (p= [0, 0, 0],n='loc_Shoulder_R')[0]
+    cmds.pointConstraint('Elbow_R',loc,offset=[0,0,0],w=1,)
+    cmds.geometryConstraint(nurbsPl,loc,w=1,)
+    cmds.parentConstraint (jointParent,nurbsPl,mo=True, w= 1)
+    cmds.scaleConstraint (jointParent,nurbsPl,mo=True, w= 1)
+    cposNode=cmds.createNode ("closestPointOnSurface",n='cpos_Shoulder_R')
+    cmds.connectAttr (str(nurbShape)+'.worldSpace[0]', str(cposNode)+'.inputSurface',f=True)
+    cmds.connectAttr (str(loc)+'.translate', str(cposNode)+'.inPosition',f=True)
+    grp=cmds.group (em=True,w=True,n='R_Shoulder_uvd_grp')
+    cmds.parent(nurbsPl,loc,grp)
+    cmds.setAttr(grp+'.visibility',0)
+    if cmds.objExists('baseNoTrans_grp'):
+        cmds.parent(grp,'baseNoTrans_grp')
+    
+createUvDriver()
