@@ -1,0 +1,25 @@
+#Change source_object and target_object
+#Bring value through control
+#Add target in Bland Shape(shape editor)
+
+
+import maya.cmds as cmds
+
+def vertexMatch(source_obj, target_obj, tolerance=1e-6):
+    totalVertices = cmds.polyEvaluate(source_obj, vertex=True)
+
+    for i in range(totalVertices):
+        # Get the positions of the source and target vertices
+        source_vertex_pos = cmds.pointPosition(source_obj + '.vtx[' + str(i) + ']', world=True)
+        target_vertex_pos = cmds.pointPosition(target_obj + '.vtx[' + str(i) + ']', world=True)
+
+        # Check if the vertex position differs beyond the given tolerance
+        if not all(abs(s - t) <= tolerance for s, t in zip(source_vertex_pos, target_vertex_pos)):
+            # Move the target vertex to the source vertex position
+            cmds.move(source_vertex_pos[0], source_vertex_pos[1], source_vertex_pos[2], 
+                      target_obj + '.vtx[' + str(i) + ']', worldSpace=True)
+
+source_object = 'R_pant_knee_Z_neg_120'
+target_object = 'lukeyorkshire_modelHigh_01_:pant_GEO'
+
+vertexMatch(source_object, target_object)
