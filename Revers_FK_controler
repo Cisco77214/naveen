@@ -1,0 +1,196 @@
+##Create Forward Reverse FK Controlers
+
+# Tools for creating FK Controlers that have Reverse behaviour. suitable for adding more control to the body spine IK Controlers, rope, or just simple IK-FK rig 
+# Author :  Res Yudikata
+# How to use : just Run this entire script in python Tab
+# adjust the guide name, number and position
+# then create the controlers
+
+import pymel.core as pm
+
+if pm.window('ForwardReverseFK', exists=True):
+    pm.deleteUI('ForwardReverseFK')
+    
+pm.window('ForwardReverseFK', s=True)
+pm.columnLayout(columnAlign='center', rowSpacing=10)
+
+myLayout = pm.columnLayout('WindowLayout',adjustableColumn=1)
+
+
+    
+def guidebuild(*args):    
+    NumOfCon = pm.intField('Values', query = True, value = True)
+    NameOfCon = pm.textField('cNames', query = True ,text=True)
+    startfrom = 1    
+    numCtrls = NumOfCon
+    name = NameOfCon
+    
+    guidesGrp = pm.group(em=True, n='{}_FK_GUIDES'.format(name))
+    for i in range(numCtrls+1):
+        loc = pm.spaceLocator(n='{}_FK_{}_LOC'.format(name, i + startfrom))
+        loc.translate.set(0, i*2, 0)
+        pm.parent(loc, guidesGrp)
+    
+    locators = guidesGrp.getChildren()
+    
+    selLoc=pm.ls('{}_FK_{}_LOC'.format(name, i + startfrom))[0]
+    selLocParent=pm.ls('{}_FK_{}_LOC'.format(name, i + startfrom-1))[0]
+
+    pm.parent (selLoc,selLocParent)
+    pm.setAttr(selLoc+'.visibility',0)
+
+def CreateRevFK(*arg):
+
+    obj = pm.ls(sl=1)[0]
+    sn = obj.split('_')
+    locators = pm.ls(sn[0] + '_' + sn[1] + '*' + 'LOC')
+    enloc = sn[0] + '_' + sn[1] + '*' + 'EndLOC'   
+    nameGuide = obj.split('_FK_GUIDES')[0]
+   
+    if pm.objExists(enloc):
+    
+        last = len(locators) - 1
+        dlast = locators[last]   
+        locators.pop(last)
+       
+    prevCtl = None
+    ctlGrp = None
+    prevPac = None
+    prevTgt =None
+    pac = None
+    tgt = None
+    pacList = []
+    ctlGrpList = []
+    name = sn[0]
+    posall = []
+    rotall = []
+    
+    loc = []
+    loclist = []
+    paclist = []
+    
+    for i in range(len(locators)):
+        if ctlGrp:
+            prevCtl = ctl
+            pm.parent(prevCtl, ctlGrp )
+                   
+        ctl = pm.circle(radius=1.5,nr=(0, 1, 0))[0]
+        pm.setAttr(ctl + ".overrideEnabled", 1)
+        pm.setAttr(ctl + ".overrideRGBColors",1)
+        pm.setAttr(ctl + ".overrideColorRGB", 1 ,1 ,0)          
+        pm.rename(ctl,'{}_fwdFk{}_Ctrl'.format(name, i+1))
+        
+        pos = pm.xform(locators[i], q=True, ws=True, t=True)
+        rot = pm.xform(locators[i], q=True, ws=True, ro=True)
+    
+        pm.setAttr(ctl + '.translate' , pos)
+        pm.setAttr(ctl + '.rotate' , rot)
+          
+        grp = ctl.replace('Ctrl','RG')
+        ctlGrp = pm.group ( em = 1 , name = grp)
+        pm.setAttr(ctlGrp + '.translate' , pos)
+        pm.setAttr(ctlGrp + '.rotate' , rot)
+    
+        if prevCtl:
+            pm.parent(ctlGrp, prevCtl)
+        
+    
+    pm.parent (('{}_fwdFk{}_Ctrl'.format(name, len(locators) )) , ctlGrp )
+
+    for i in range(len(locators)):
+        if ctlGrp:
+            prevCtl = ctl
+            pm.parent(prevCtl, ctlGrp )
+    
+        ctl = pm.circle(radius=1.25,nr=(0, 1, 0))[0]
+        pm.setAttr(ctl + ".overrideEnabled", 1)
+        pm.setAttr(ctl + ".overrideRGBColors",1)
+        pm.setAttr(ctl + ".overrideColorRGB", 1 ,0 ,1)          
+        pm.rename(ctl,'{}_rvsFk{}_Ctrl'.format(name, i+1))
+        
+        pos = pm.xform(locators[::-1][i], q=True, ws=True, t=True)
+        rot = pm.xform(locators[::-1][i], q=True, ws=True, ro=True)
+    
+        pm.setAttr(ctl + '.translate' , pos)
+        pm.setAttr(ctl + '.rotate' , rot)
+        pm.setAttr(ctl + '.scale' ,[1,1,1])
+    
+        grp = ctl.replace('Ctrl','RG')
+        ctlGrp = pm.group ( em = 1 , name = grp)
+        pm.setAttr(ctlGrp + '.translate' , pos)
+        pm.setAttr(ctlGrp + '.rotate' , rot)
+        pm.setAttr(ctlGrp + '.scale' ,[1,1,1])
+
+        if prevCtl:
+            pm.parent(ctlGrp, prevCtl)
+        ctlGrpList.append(ctlGrp)
+    
+    pm.parent (('{}_rvsFk{}_Ctrl'.format(name, len(locators) )) , ctlGrp )
+    selCon=pm.ls('{}_fwdFk{}_Ctrl'.format(name, len(locators) ))[0]
+
+    pm.setAttr(selCon+'Shape.visibility', 0)    
+    
+    
+    for i in range(len(locators)):
+        tat = pm.spaceLocator(n='{}_rvsFk_{}_loc'.format(name, locators[::-1][i]))
+        loc.append(tat)
+        
+    fwd = pm.ls(nameGuide + '*fwd*Ctrl')
+    rvs = pm.ls(nameGuide + '*rvs*RG')
+    
+    for j in range(len(loc)):
+        
+        parrvs = pm.listRelatives(rvs[::-1][j],parent =1)[0]
+        pm.parent(loc[j], fwd[j])
+        pm.setAttr(loc[j]+'.visibility' , 0)
+        pc = pm.parentConstraint( fwd[j] , loc[j] , mo=0 )
+        pm.delete(pc)
+        loclist.append(loc[j])
+    
+    for k in range(len(loclist)):
+        parrvs = pm.listRelatives(rvs[k],parent =1)[0]
+        pac = pm.createNode('parentConstraint', n='{}_PAC'.format(rvs[k]))
+        pacList.append(pac)
+        pm.parent(pac, rvs[k])  
+        loclist[k].worldInverseMatrix[0] >> pac.constraintParentInverseMatrix
+            
+        if prevPac and prevLoc:
+            prevLoc.worldMatrix[0] >> pac.target[0].targetParentMatrix
+                    
+        if pac:   
+            prevPac = pac
+            
+        prevLoc = loclist[k]
+        
+    for h in range(len(pacList)):   
+        pacList[::-1][h].constraintTranslate >> ctlGrpList[h].translate
+        pacList[::-1][h].constraintRotate >> ctlGrpList[h].rotate    
+    namaB=selCon.replace('Ctrl','End')
+    print(namaB)
+    FkEnd=pm.rename(selCon, namaB)
+
+        
+pm.separator(w=150,h=5)
+pm.text( label = 'FwdRvsFK Controlers Creator :',height = 30)
+
+pm.separator(w=150,h=5)
+
+
+pm.text( label = 'Create Guide Locators',height = 30)
+pm.text( label = 'Controlers/Guide Name',bgc=[.2,.3,.1],width=200)
+
+pm.textField('cNames'  )
+pm.separator(w=150,h=5)
+pm.text(label='Number Of Guide',bgc=[.2,.4,.2],)
+pm.intField('Values' , value = 5)
+pm.separator(w=150,h=10)
+pm.setParent(myLayout)
+pm.button(label = 'Create Guide Locator',bgc=[.6,.4,.3],command=guidebuild)
+pm.separator(w=150,h=5)
+
+pm.separator(w=150,h=15)
+pm.text( label = 'Create Controlers',height = 30)
+pm.text( label = 'Select Guides Group first and klick this button',height = 30)
+
+pm.button( label = 'Create FwdRvsFK Controlers', bgc=[.6,.7,.5] , command=CreateRevFK)
+pm.showWindow()         
