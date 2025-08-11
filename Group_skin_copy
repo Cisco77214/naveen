@@ -1,0 +1,101 @@
+''' select skinned mesh group, then select mesh group to transfer , and run '''
+''' Keep in mind Both Group Hierarchy is Same Before Run Script'''
+import maya.cmds as cmds
+
+def grpSkin():
+    ObjList=cmds.ls(sl=1 ,l=1)
+    GrpChild = cmds.listRelatives(ObjList[0],c=1)
+    GrpChild2 = cmds.listRelatives(ObjList[1],c=1)
+    if(len(GrpChild) == len(GrpChild2)):
+        for each in GrpChild:
+            lsHistory=cmds.listHistory(each)
+            transformObj=cmds.listRelatives( lsHistory, parent=True )
+            selectSkinCluster=cmds.ls(lsHistory ,type='skinCluster')
+            queryJoint=cmds.skinCluster(selectSkinCluster, query=True,inf=True)
+            ObjQueryItem=GrpChild.index(each)
+            objselect=GrpChild2[ObjQueryItem]
+            cmds.skinCluster(queryJoint,objselect,tsb=True)
+            cmds.copySkinWeights(GrpChild2[ObjQueryItem],GrpChild[ObjQueryItem], nm=True, surfaceAssociation='closestPoint',ia="oneToOne")
+    else:
+         print ("Select Group with Same Number Of Child")
+         
+def singleSkin():
+    ObjList=cmds.ls(sl=1)
+    if(len(ObjList) == 2):
+        lsHistory=cmds.listHistory(ObjList[0])
+        transformObj=cmds.listRelatives( lsHistory, parent=True )
+        selectSkinsCluster=cmds.ls(lsHistory ,type='skinCluster')
+        queryJoint=cmds.skinCluster(selectSkinsCluster, query=True,inf=True)
+        cmds.skinCluster(queryJoint,ObjList[1],tsb=True)
+        cmds.copySkinWeights(ObjList[1],ObjList[0], nm=True, surfaceAssociation='closestPoint',ia="oneToOne")
+    else:
+        print("Please Select Two Geometry")
+    
+def oneToMultiObject():
+    objsel=cmds.ls(sl=1)
+    if(len(objsel) >2):    
+        lsHistory=cmds.listHistory(objsel[0])
+        selectSkinClusters=cmds.ls(lsHistory ,type='skinCluster')
+        queryJoint=cmds.skinCluster(selectSkinClusters, query=True,inf=True)
+        for each in range(1,len(objsel)):
+            cmds.skinCluster(queryJoint,objsel[each],tsb=True)
+            cmds.copySkinWeights(objsel[0],objsel[each], nm=True, surfaceAssociation='closestPoint',ia="oneToOne")
+    else:
+         print ("Please Select More Than Two Object")
+         
+def mirror_locRL():
+    selObj=cmds.ls(sl=1)
+    if(len(selObj)==1):
+        lsHistory=cmds.listHistory(selObj)
+        selectSkinClusters=cmds.ls(lsHistory ,type=('skinCluster',"blendShape"))
+        for each in selectSkinClusters:
+            cmds.setAttr(each + ".envelope",0)
+            cmds.copySkinWeights( ss=selectSkinClusters[0], ds=selectSkinClusters[0], mirrorMode='YZ', mirrorInverse=True )
+        for eachEnable in selectSkinClusters:
+            cmds.setAttr(eachEnable + ".envelope",1)
+    else:
+        print("Select Only One Geometery")
+    
+def mirror_locLR():
+    selObj=cmds.ls(sl=1)
+    if(len(selObj)==1):
+        lsHistory=cmds.listHistory(selObj)
+        selectSkinClusters=cmds.ls(lsHistory ,type=('skinCluster',"blendShape"))
+        for each in selectSkinClusters:
+            cmds.setAttr(each + ".envelope",0)
+            cmds.copySkinWeights( ss=selectSkinClusters[0], ds=selectSkinClusters[0], mirrorMode='YZ')
+        for eachEnable in selectSkinClusters:
+            cmds.setAttr(eachEnable + ".envelope",1)
+    else:
+        print("Select Only One Geometery")
+
+def renameChildren():
+    ObjList=cmds.ls(sl=1 ,l=1)
+    GrpChild = cmds.listRelatives(ObjList[0],ad=1,typ="transform")
+    GrpChild2 = cmds.listRelatives(ObjList[1],pa=1,ad=1,typ="transform")
+    for eachname in GrpChild2:
+        newname= eachname.split("|")
+        cmds.rename(eachname,newname[-1] + "1")
+
+def OldName():
+    ObjList=cmds.ls(sl=1 ,l=1)
+    GrpChild = cmds.listRelatives(ObjList[0],ad=1,typ="transform")
+    GrpChild2 = cmds.listRelatives(ObjList[1],ad=1,typ="transform")
+    for eachname in GrpChild2:
+        cmds.rename(eachname,eachname[0:-1])
+                
+def CopySkin():
+    if cmds.window("characterRig",exists =True):
+        cmds.deleteUI("characterRig")
+    characterRigWin=cmds.window("characterRig",title="Character Rig",sizeable=0)
+    cmds.rowColumnLayout( numberOfColumns=1 )
+    cmds.button(l="Copy Group To Group Skin " , w=200 , c="grpSkin()")
+    cmds.button(l="Single To Single Object" , w=200 , c="singleSkin()")
+    cmds.button(l="Single To Multiple Object" , w=200 , c="oneToMultiObject()")
+    cmds.button(l="Mirror L -> R" , w=200 , c="mirror_locRL()")
+    cmds.button(l="Mirror R -> L" , w=200 , c="mirror_locRL()")
+    cmds.button(l="Rename Children" , w=200 , c="renameChildren()")
+    cmds.button(l="Old Name" , w=200 , c="OldName()")
+    cmds.showWindow(characterRigWin)
+        
+CopySkin()
