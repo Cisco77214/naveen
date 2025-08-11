@@ -1,0 +1,348 @@
+import maya.cmds as cmds
+
+# Global variables to store selections (used by UI buttons)
+selA = []
+selB = []
+BSnodes = [] # Assuming BSnodes is also intended to be global for blendshape tracking
+
+def selectionA():
+    """ Stores the current selection in selA (Parent/Source list). """
+    global selA
+    selA = cmds.ls(selection=True)
+    if not selA:
+        cmds.warning("No objects selected for Parent/Source List (selA).")
+    else:
+        print(f"Parent/Source List (selA): {selA}")
+
+def selectionB():
+    """ Stores the current selection in selB (Children/Target list). """
+    global selB
+    selB = cmds.ls(selection=True)
+    if not selB:
+        cmds.warning("No objects selected for Children/Target List (selB).")
+    else:
+        print(f"Children/Target List (selB): {selB}")
+######################################################################
+
+def connectBlendShapes():
+    """
+    Creates blend shapes from selA to selB (1:1 mapping) and sets target weights to 1.
+    Assumes selA and selB are already populated.
+    """
+    global BSnodes
+    BSnodes = []
+
+    if not selA or not selB:
+        cmds.warning("Please select objects for both ParentList (selA) and ChildrenList (selB) first.")
+        return
+
+    if len(selA) != len(selB):
+        cmds.warning("For blend shapes, the number of objects in ParentList (selA) and ChildrenList (selB) must match.")
+        return
+
+    for i, j in zip(selA, selB):
+        try:
+            # Create blend shape from 'j' (target) to 'i' (base mesh/driver)
+            # Typically, blend shape targets are driven by a base mesh.
+            # If 'i' is the target shape and 'j' is the base mesh, then it's (target, base_mesh)
+            # Let's assume 'i' are the target shapes and 'j' are the base meshes
+            BSoutput = cmds.blendShape(i, j, name=f"{j}_BS")[0] # Use j for naming as it's the base mesh
+            BSnodes.append(BSoutput)
+            cmds.setAttr(f"{BSoutput}.{i}", 1) # Set the weight of target 'i' to 1
+        except RuntimeError as e:
+            cmds.warning(f"Could not create blendShape between {i} and {j}: {e}")
+            continue
+
+    if BSnodes:
+        print(f"Created BlendShape Nodes: {BSnodes}")
+    else:
+        cmds.warning("No blend shapes were created.")
+
+def DisconnectBlendShapes():
+    """
+    Deletes blendShape nodes connected to objects in selB.
+    """
+    BS_output = []
+
+    if not selB:
+        cmds.warning("Please select objects for ChildrenList (selB) first to find connected blendShapes.")
+        return
+
+    for i in selB:
+        hist = cmds.listHistory(i, future=False) # Only look at incoming history (inputs)
+        if hist:
+            for j in hist:
+                if cmds.nodeType(j) == "blendShape":
+                    BS_output.append(j)
+
+    if not BS_output:
+        cmds.warning("No blendShape nodes found connected to selected ChildrenList (selB) objects.")
+        return
+
+    unique_bs_nodes = list(set(BS_output)) # Get unique blendShape nodes
+    for each_bs in unique_bs_nodes:
+        try:
+            cmds.delete(each_bs)
+            print(f"Deleted blendShape node: {each_bs}")
+        except RuntimeError as e:
+            cmds.warning(f"Could not delete blendShape node {each_bs}: {e}")
+
+#######################################################################################
+
+def _constrain_objects(constraint_type, offset_checkbox_name, maintain_offset_default=True):
+    """
+    A helper function to generalize constraint creation.
+    Args:
+        constraint_type (function): The Maya constraint command (e.g., cmds.parentConstraint).
+        offset_checkbox_name (str): The name of the UI checkbox for 'maintain offset'.
+        maintain_offset_default (bool): Default value for maintain offset if checkbox doesn't exist.
+    """
+    maintain_offset = cmds.checkBox(offset_checkbox_name, query=True, value=True) \
+                        if cmds.control(offset_checkbox_name, exists=True) else maintain_offset_default
+
+    if not selA or not selB:
+        cmds.warning("Please define both ParentList (selA) and ChildrenList (selB) first.")
+        return
+
+    if len(selA) == len(selB):
+        for source, target in zip(selA, selB):
+            try:
+                constraint_type(source, target, mo=maintain_offset)
+                print(f"Applied {constraint_type.__name__} from {source} to {target}.")
+            except RuntimeError as e:
+                cmds.warning(f"Could not apply constraint from {source} to {target}: {e}")
+    elif len(selA) == 1 and len(selB) > 0:
+        for target in selB:
+            try:
+                constraint_type(selA[0], target, mo=maintain_offset)
+                print(f"Applied {constraint_type.__name__} from {selA[0]} to {target}.")
+            except RuntimeError as e:
+                cmds.warning(f"Could not apply constraint from {selA[0]} to {target}: {e}")
+    else:
+        cmds.warning("List lengths mismatch. Either select one Parent/Source for multiple Children/Targets, or make list lengths equal.")
+
+def ParentC():
+    """ Creates parent constraints based on selA and selB. """
+    _constrain_objects(cmds.parentConstraint, "ParentOffset")
+
+def OrientC():
+    """ Creates orient constraints based on selA and selB. """
+    _constrain_objects(cmds.orientConstraint, "OrientOffset")
+
+def PointC():
+    """ Creates point constraints based on selA and selB. """
+    _constrain_objects(cmds.pointConstraint, "PointOffset")
+
+def AimC():
+    """ Creates aim constraints based on selA and selB. """
+    # Aim constraint has additional aimVector and upVector arguments.
+    # For simplicity, we'll use defaults (aimVector=(1,0,0), upVector=(0,1,0))
+    # If you need custom vectors, you'd add UI elements for them.
+    aim_offset = cmds.checkBox("AimOffset", query=True, value=True) \
+                 if cmds.control("AimOffset", exists=True) else True # Default to True if checkbox not found
+
+    if not selA or not selB:
+        cmds.warning("Please define both ParentList (selA) and ChildrenList (selB) first.")
+        return
+
+    if len(selA) == len(selB):
+        for source, target in zip(selA, selB):
+            try:
+                cmds.aimConstraint(source, target, mo=aim_offset, aimVector=(1,0,0), upVector=(0,1,0))
+                print(f"Applied Aim Constraint from {source} to {target}.")
+            except RuntimeError as e:
+                cmds.warning(f"Could not apply aim constraint from {source} to {target}: {e}")
+    elif len(selA) == 1 and len(selB) > 0:
+        for target in selB:
+            try:
+                cmds.aimConstraint(selA[0], target, mo=aim_offset, aimVector=(1,0,0), upVector=(0,1,0))
+                print(f"Applied Aim Constraint from {selA[0]} to {target}.")
+            except RuntimeError as e:
+                cmds.warning(f"Could not apply aim constraint from {selA[0]} to {target}: {e}")
+    else:
+        cmds.warning("List lengths mismatch. Either select one Parent/Source for multiple Children/Targets, or make list lengths equal.")
+
+def ScaleC():
+    """ Creates scale constraints based on selA and selB. """
+    _constrain_objects(cmds.scaleConstraint, "ScaleOffset")
+        
+##############################################################################################
+
+def MatchTransforms():
+    """ Matches the full transform (translate, rotate, scale) of selB objects to selA objects. """
+    if not selA or not selB:
+        cmds.warning("Please define both ParentList (selA) and ChildrenList (selB) first.")
+        return
+
+    if len(selA) == len(selB):
+        for source, target in zip(selA, selB):
+            try:
+                cmds.matchTransform(target, source)
+                print(f"Matched transform of {target} to {source}.")
+            except RuntimeError as e:
+                cmds.warning(f"Could not match transform of {target} to {source}: {e}")
+    elif len(selA) == 1 and len(selB) > 0:
+        for target in selB:
+            try:
+                cmds.matchTransform(target, selA[0])
+                print(f"Matched transform of {target} to {selA[0]}.")
+            except RuntimeError as e:
+                cmds.warning(f"Could not match transform of {target} to {selA[0]}: {e}")
+    else:
+        cmds.warning("List lengths mismatch. Either select one Parent/Source for multiple Children/Targets, or make list lengths equal.")
+
+def Match_Pivots():
+    """ Matches the pivot of selB objects to selA objects. """
+    if not selA or not selB:
+        cmds.warning("Please define both ParentList (selA) and ChildrenList (selB) first.")
+        return
+
+    if len(selA) == len(selB):
+        for source, target in zip(selA, selB):
+            try:
+                cmds.matchTransform(target, source, piv=True)
+                print(f"Matched pivot of {target} to {source}.")
+            except RuntimeError as e:
+                cmds.warning(f"Could not match pivot of {target} to {source}: {e}")
+    elif len(selA) == 1 and len(selB) > 0:
+        for target in selB:
+            try:
+                cmds.matchTransform(target, selA[0], piv=True)
+                print(f"Matched pivot of {target} to {selA[0]}.")
+            except RuntimeError as e:
+                cmds.warning(f"Could not match pivot of {target} to {selA[0]}: {e}")
+    else:
+        cmds.warning("List lengths mismatch. Either select one Parent/Source for multiple Children/Targets, or make list lengths equal.")
+
+def Parenting():
+    """ Parents selB objects under selA objects. """
+    if not selA or not selB:
+        cmds.warning("Please define both ParentList (selA) and ChildrenList (selB) first.")
+        return
+
+    if len(selA) == len(selB):
+        for parent_obj, child_obj in zip(selA, selB):
+            try:
+                cmds.parent(child_obj, parent_obj)
+                print(f"Parented {child_obj} under {parent_obj}.")
+            except RuntimeError as e:
+                cmds.warning(f"Could not parent {child_obj} under {parent_obj}: {e}")
+    elif len(selA) == 1 and len(selB) > 0:
+        for child_obj in selB:
+            try:
+                cmds.parent(child_obj, selA[0])
+                print(f"Parented {child_obj} under {selA[0]}.")
+            except RuntimeError as e:
+                cmds.warning(f"Could not parent {child_obj} under {selA[0]}: {e}")
+    else:
+        cmds.warning("List lengths mismatch. Either select one Parent/Source for multiple Children/Targets, or make list lengths equal.")
+
+def connectAttributes():
+    """ Connects translate, rotate, and scale attributes from selA to selB. """
+    if not selA or not selB:
+        cmds.warning("Please define both ParentList (selA) and ChildrenList (selB) first.")
+        return
+
+    if len(selA) == len(selB):
+        for source, target in zip(selA, selB):
+            for attr in ['t', 'r', 's']:
+                try:
+                    cmds.connectAttr(f"{source}.{attr}", f"{target}.{attr}")
+                    print(f"Connected {source}.{attr} to {target}.{attr}.")
+                except RuntimeError as e:
+                    cmds.warning(f"Could not connect {source}.{attr} to {target}.{attr}: {e}")
+    elif len(selA) == 1 and len(selB) > 0:
+        for target in selB:
+            for attr in ['t', 'r', 's']:
+                try:
+                    cmds.connectAttr(f"{selA[0]}.{attr}", f"{target}.{attr}")
+                    print(f"Connected {selA[0]}.{attr} to {target}.{attr}.")
+                except RuntimeError as e:
+                    cmds.warning(f"Could not connect {selA[0]}.{attr} to {target}.{attr}: {e}")
+    else:
+        cmds.warning("List lengths mismatch. Either select one Parent/Source for multiple Children/Targets, or make list lengths equal.")
+        
+###################################################################
+
+def customwindow(name):
+    """
+    Creates the main UI window for the selection and constraint tools.
+    """
+    if cmds.window(name, exists=True):
+        cmds.deleteUI(name)
+
+    mywindow = cmds.window(name, width=350, height=560, sizeable=False, title="Selection Tools v1.1")
+    cmds.showWindow(mywindow)
+
+    W = 350
+    # H = 500 # This 'H' variable is not used consistently for dynamic height.
+            # Using fixed height for controls, but total window height will adapt.
+
+    cmds.columnLayout(adjustableColumn=True) # Use adjustableColumn for better scaling
+
+    # --- Selection Buttons ---
+    cmds.rowColumnLayout(numberOfColumns=2, columnWidth=[(1, W/2), (2, W/2)], columnOffset=[(1, "left", 2), (2, "left", 2)])
+    cmds.button(label="Set Parent/Source", c="selectionA()", height=50, backgroundColor=(0.2, 0.3, 0.4))
+    cmds.button(label="Set Child/Target", c="selectionB()", height=50, backgroundColor=(0.2, 0.3, 0.4))
+    cmds.setParent("..") # End rowColumnLayout
+
+    cmds.separator(height=10, style="in") # Spacer
+
+    # --- Constraint Section ---
+    cmds.frameLayout(label="Constraints", collapsable=True, collapse=False, backgroundColor=(0.15, 0.15, 0.15))
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=5) # Layout for constraint buttons
+
+    # Parent Constraint
+    cmds.rowColumnLayout(numberOfColumns=2, columnWidth=[(1, W/3), (2, W*0.65)], columnOffset=[(1, "left", 2)])
+    cmds.checkBox("ParentOffset", label="Maintain Offset", value=True)
+    cmds.button(label="Parent Constraint", c="ParentC()", height=30, backgroundColor=(0.7, 0.4, 0.1))
+    cmds.setParent("..")
+
+    # Point Constraint
+    cmds.rowColumnLayout(numberOfColumns=2, columnWidth=[(1, W/3), (2, W*0.65)], columnOffset=[(1, "left", 2)])
+    cmds.checkBox("PointOffset", label="Maintain Offset", value=True)
+    cmds.button(label="Point Constraint", c="PointC()", height=30, backgroundColor=(0.7, 0.4, 0.1))
+    cmds.setParent("..")
+
+    # Orient Constraint
+    cmds.rowColumnLayout(numberOfColumns=2, columnWidth=[(1, W/3), (2, W*0.65)], columnOffset=[(1, "left", 2)])
+    cmds.checkBox("OrientOffset", label="Maintain Offset", value=True)
+    cmds.button(label="Orient Constraint", c="OrientC()", height=30, backgroundColor=(0.7, 0.4, 0.1))
+    cmds.setParent("..")
+
+    # Aim Constraint (NEW)
+    cmds.rowColumnLayout(numberOfColumns=2, columnWidth=[(1, W/3), (2, W*0.65)], columnOffset=[(1, "left", 2)])
+    cmds.checkBox("AimOffset", label="Maintain Offset", value=True) # Added checkbox for aim offset
+    cmds.button(label="Aim Constraint", c="AimC()", height=30, backgroundColor=(0.7, 0.4, 0.1)) # Added button
+    cmds.setParent("..")
+
+    # Scale Constraint
+    cmds.rowColumnLayout(numberOfColumns=2, columnWidth=[(1, W/3), (2, W*0.65)], columnOffset=[(1, "left", 2)])
+    cmds.checkBox("ScaleOffset", label="Maintain Offset", value=True)
+    cmds.button(label="Scale Constraint", c="ScaleC()", height=30, backgroundColor=(0.7, 0.4, 0.1))
+    cmds.setParent("..")
+
+    cmds.setParent("..") # End constraint columnLayout
+    cmds.setParent("..") # End frameLayout
+
+    cmds.separator(height=10, style="in") # Spacer
+
+    # --- Utility Section ---
+    cmds.frameLayout(label="Utilities", collapsable=True, collapse=False, backgroundColor=(0.15, 0.15, 0.15))
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=5) # Layout for utility buttons
+
+    cmds.button(label="Parent (Hierarchy)", c="Parenting()", height=30, backgroundColor=(0.5, 0.4, 0.1))
+    cmds.button(label="Connect Attributes (TRS)", c="connectAttributes()", height=30, backgroundColor=(0.5, 0.4, 0.1))
+    cmds.button(label="Match Transformations", c="MatchTransforms()", height=30, backgroundColor=(0.5, 0.4, 0.1))
+    cmds.button(label="Match Pivots", c="Match_Pivots()", height=30, backgroundColor=(0.5, 0.4, 0.1))
+    cmds.button(label="Connect Blendshape", c="connectBlendShapes()", height=30, backgroundColor=(0.5, 0.4, 0.1))
+    cmds.button(label="Disconnect Blendshape", c="DisconnectBlendShapes()", height=30, backgroundColor=(0.5, 0.4, 0.1))
+
+    cmds.setParent("..") # End utility columnLayout
+    cmds.setParent("..") # End frameLayout
+
+    cmds.refresh() # Ensures UI updates properly
+
+# Call the function to create the window
+customwindow("SetSelectionTools_v1.1")
+
