@@ -1,0 +1,365 @@
+# Controller Creator Pro (with Shape & Color Changer)
+# Maya Python 3 / PySide2
+
+import math
+import maya.cmds as cmds
+import maya.OpenMayaUI as omui
+from PySide2 import QtWidgets, QtCore, QtGui
+import shiboken2
+
+def maya_main_window():
+    ptr = omui.MQtUtil.mainWindow()
+    return shiboken2.wrapInstance(int(ptr), QtWidgets.QWidget)
+
+# ---------------------------
+# Shape creators (curve based)
+# ---------------------------
+def shape_circle(name, radius=1.0):
+    return cmds.circle(n=name, ch=False, nr=(0,1,0), r=radius)[0]
+
+def shape_square(name, size=1.0):
+    s = size
+    pts = [(-s,0,s),(s,0,s),(s,0,-s),(-s,0,-s),(-s,0,s)]
+    return cmds.curve(d=1, p=pts, n=name)
+
+def shape_cube(name, size=1.0):
+    s = size
+    pts = [(-s,-s,-s),(-s,-s,s),(-s,s,s),(-s,s,-s),(-s,-s,-s),
+           (s,-s,-s),(s,-s,s),(s,s,s),(s,s,-s),(s,-s,-s)]
+    base = cmds.curve(d=1, p=pts, n=name)
+    cmds.curve(base, a=True, d=1, p=[(-s,-s,s),(s,-s,s)])
+    cmds.curve(base, a=True, d=1, p=[(-s,s,s),(s,s,s)])
+    cmds.curve(base, a=True, d=1, p=[(-s,s,-s),(s,s,-s)])
+    return base
+
+def shape_plus(name, size=1.0):
+    s = size
+    pts = [(0,0,-s),(0,0,s),(0,0,0),(0,-s,0),(0,s,0),(0,0,0),(-s,0,0),(s,0,0)]
+    return cmds.curve(d=1, p=pts, n=name)
+
+def shape_pin(name, size=1.0):
+    s = size
+    pts = [(0,0,0),(0,s*2,0),(s*0.5,s*1.6,0),(0,s,0),(s*0.5,s*0.4,0),(0,0,0)]
+    return cmds.curve(d=1, p=pts, n=name)
+
+def shape_locator(name, size=1.0):
+    s = size
+    pts = [(-s,0,0),(s,0,0),(0,0,0),(0,-s,0),(0,s,0),(0,0,0),(0,0,-s),(0,0,s)]
+    return cmds.curve(d=1, p=pts, n=name)
+
+def shape_sphere_like(name, radius=1.0):
+    c1 = cmds.circle(n=name + "_A", ch=False, nr=(1,0,0), r=radius)[0]
+    c2 = cmds.circle(n=name + "_B", ch=False, nr=(0,1,0), r=radius)[0]
+    c3 = cmds.circle(n=name + "_C", ch=False, nr=(0,0,1), r=radius)[0]
+    grp = cmds.group(c1, c2, c3, n=name)
+    return grp
+
+def shape_star(name, outer=1.0, inner=0.45, points=5):
+    pts = []
+    for i in range(points*2 + 1):
+        ang = math.radians(i * (360.0 / (points*2)))
+        r = outer if i % 2 == 0 else inner
+        x = math.cos(ang)*r
+        z = math.sin(ang)*r
+        pts.append((x,0,z))
+    return cmds.curve(d=1, p=pts, n=name)
+
+def shape_diamond(name, size=1.0):
+    s = size
+    pts = [(0,s,0),(s,0,0),(0,-s,0),(-s,0,0),(0,s,0)]
+    return cmds.curve(d=1, p=pts, n=name)
+
+def shape_pyramid(name, size=1.0):
+    s = size
+    pts = [(-s,0,-s),(s,0,-s),(s,0,s),(-s,0,s),(-s,0,-s),(0,s,0),
+           (s,0,s),(-s,0,s),(0,s,0),(-s,0,-s),(s,0,-s)]
+    return cmds.curve(d=1, p=pts, n=name)
+
+def shape_gear_like(name, teeth=8, outer=1.0, inner=0.65, tooth_depth=0.25):
+    pts = []
+    steps = teeth * 4
+    for i in range(steps+1):
+        ang = math.radians(i * (360.0/steps))
+        base_r = outer if (i % 4 in (0,1)) else inner
+        x = math.cos(ang) * base_r
+        z = math.sin(ang) * base_r
+        pts.append((x,0,z))
+    return cmds.curve(d=1, p=pts, n=name)
+
+SHAPE_CREATORS = {
+    "Circle": shape_circle,
+    "Square": shape_square,
+    "Cube": shape_cube,
+    "Sphere": shape_sphere_like,
+    "Plus": shape_plus,
+    "Pin": shape_pin,
+    "Locator": shape_locator,
+    "Star": shape_star,
+    "Diamond": shape_diamond,
+    "Pyramid": shape_pyramid,
+    "Gear": shape_gear_like
+}
+
+# ---------------------------
+# Utility
+# ---------------------------
+def set_rgb_on_shapes(transform, rgb):
+    shapes = cmds.listRelatives(transform, shapes=True, allDescendents=True, fullPath=True) or []
+    for s in shapes:
+        try:
+            cmds.setAttr(s + ".overrideEnabled", 1)
+            cmds.setAttr(s + ".overrideRGBColors", 1)
+            cmds.setAttr(s + ".overrideColorRGB", *rgb)
+        except:
+            pass
+
+def snap_transform_to_target(transform, target):
+    pos = cmds.xform(target, q=True, ws=True, t=True)
+    rot = cmds.xform(target, q=True, ws=True, ro=True)
+    cmds.xform(transform, ws=True, t=pos)
+    cmds.xform(transform, ws=True, ro=rot)
+
+def build_controller_for_joint(joint, shape_name, color_rgb):
+    base = joint.split("|")[-1]
+    ctl_name = base + "_Ctl"
+    offset_name = base + "_Offset_GRP"
+    main_name = base + "_Main_GRP"
+    creator = SHAPE_CREATORS.get(shape_name, shape_circle)
+    created = creator(ctl_name)
+    ctl_tx = created
+    try:
+        offset_grp = cmds.group(ctl_tx, n=offset_name)
+    except:
+        ctl_tx = cmds.rename(ctl_tx, ctl_name + "_auto")
+        offset_grp = cmds.group(ctl_tx, n=offset_name)
+    main_grp = cmds.group(offset_grp, n=main_name)
+    return main_grp, offset_grp, ctl_tx
+
+def replace_controller_shape(ctrl_transform, shape_name):
+    # delete existing shapes
+    old_shapes = cmds.listRelatives(ctrl_transform, shapes=True, fullPath=True) or []
+    if old_shapes:
+        cmds.delete(old_shapes)
+    # create new shape temp
+    creator = SHAPE_CREATORS.get(shape_name, shape_circle)
+    temp_shape = creator(ctrl_transform + "_tempShape")
+    # get shapes of new curve
+    new_shapes = cmds.listRelatives(temp_shape, shapes=True, fullPath=True) or []
+    for s in new_shapes:
+        cmds.parent(s, ctrl_transform, shape=True, r=True)
+        cmds.rename(s, ctrl_transform + "Shape")
+    cmds.delete(temp_shape)
+
+# ---------------------------
+# UI
+# ---------------------------
+class ControllerCreatorPro(QtWidgets.QDialog):
+    def __init__(self, parent=maya_main_window()):
+        super().__init__(parent)
+        self.setWindowTitle("Controller Creator Pro")
+        self.setMinimumWidth(440)
+        self.setObjectName("ControllerCreatorProUI")  # give Maya-recognizable name
+        self.setWindowFlags(self.windowFlags() ^ QtCore.Qt.WindowContextHelpButtonHint)
+        self._chosen_rgb = (1.0, 1.0, 0.0)
+        self._mod_rgb = (0.0, 1.0, 1.0)
+        self.build_ui()
+        self.create_connections()
+        self.apply_styles()
+
+    def build_ui(self):
+        self.main_layout = QtWidgets.QVBoxLayout(self)
+        header = QtWidgets.QLabel(" Controller Creator Pro  ")
+        header.setAlignment(QtCore.Qt.AlignCenter)
+        header.setObjectName("headerLabel")
+        self.main_layout.addWidget(header)
+
+        # Create Controllers Section
+        top_row = QtWidgets.QHBoxLayout()
+        self.shape_combo = QtWidgets.QComboBox()
+        for s in SHAPE_CREATORS.keys():
+            self.shape_combo.addItem(s)
+        self.color_swatch = QtWidgets.QPushButton()
+        self.color_swatch.setFixedSize(38, 22)
+        self._update_swatch(self.color_swatch, self._chosen_rgb)
+        self.color_pick_btn = QtWidgets.QPushButton("Pick")
+        top_row.addWidget(QtWidgets.QLabel("Shape:"))
+        top_row.addWidget(self.shape_combo)
+        top_row.addSpacing(12)
+        top_row.addWidget(QtWidgets.QLabel("Color:"))
+        color_layout = QtWidgets.QHBoxLayout()
+        color_layout.addWidget(self.color_swatch)
+        color_layout.addWidget(self.color_pick_btn)
+        top_row.addLayout(color_layout)
+        self.main_layout.addLayout(top_row)
+
+        opts_group = QtWidgets.QGroupBox("Options")
+        opts_layout = QtWidgets.QGridLayout()
+        self.ctrl_chk = QtWidgets.QCheckBox("Create Ctrl"); self.ctrl_chk.setChecked(True)
+        self.parent_chk = QtWidgets.QCheckBox("Parent Constraint"); self.parent_chk.setChecked(True)
+        self.scale_chk = QtWidgets.QCheckBox("Scale Constraint"); self.scale_chk.setChecked(True)
+        self.fk_hierarchy_chk = QtWidgets.QCheckBox("FK Hierarchy")
+        opts_layout.addWidget(self.ctrl_chk, 0, 0)
+        opts_layout.addWidget(self.parent_chk, 0, 1)
+        opts_layout.addWidget(self.scale_chk, 1, 0)
+        opts_layout.addWidget(self.fk_hierarchy_chk, 1, 1)
+        opts_group.setLayout(opts_layout)
+        self.main_layout.addWidget(opts_group)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.create_btn = QtWidgets.QPushButton("Create Controllers")
+        self.close_btn = QtWidgets.QPushButton("Close")
+        btn_row.addStretch(); btn_row.addWidget(self.create_btn); btn_row.addWidget(self.close_btn)
+        self.main_layout.addLayout(btn_row)
+
+        # Modify Controllers Section
+        mod_group = QtWidgets.QGroupBox("Modify Selected Controllers")
+        mod_layout = QtWidgets.QVBoxLayout()
+        shape_row = QtWidgets.QHBoxLayout()
+        self.mod_shape_combo = QtWidgets.QComboBox()
+        for s in SHAPE_CREATORS.keys():
+            self.mod_shape_combo.addItem(s)
+        shape_row.addWidget(QtWidgets.QLabel("New Shape:"))
+        shape_row.addWidget(self.mod_shape_combo)
+        mod_layout.addLayout(shape_row)
+
+        color_row = QtWidgets.QHBoxLayout()
+        self.mod_color_swatch = QtWidgets.QPushButton()
+        self.mod_color_swatch.setFixedSize(38, 22)
+        self._update_swatch(self.mod_color_swatch, self._mod_rgb)
+        self.mod_color_pick_btn = QtWidgets.QPushButton("Pick")
+        color_row.addWidget(QtWidgets.QLabel("New Color:"))
+        color_row.addWidget(self.mod_color_swatch)
+        color_row.addWidget(self.mod_color_pick_btn)
+        mod_layout.addLayout(color_row)
+
+        btn_mod_row = QtWidgets.QHBoxLayout()
+        self.change_shape_btn = QtWidgets.QPushButton("Change Shape")
+        self.change_color_btn = QtWidgets.QPushButton("Change Color")
+        btn_mod_row.addWidget(self.change_shape_btn)
+        btn_mod_row.addWidget(self.change_color_btn)
+        mod_layout.addLayout(btn_mod_row)
+
+        mod_group.setLayout(mod_layout)
+        self.main_layout.addWidget(mod_group)
+
+        footer = QtWidgets.QLabel("Select joints to create, or controllers to modify.")        
+        footer.setStyleSheet("color:#888; font-size:11px;")
+        footer_name = QtWidgets.QLabel("Naveen.M_Control_Tool_Kit")
+        footer_name.setStyleSheet("color:#888; font-size:13px;")
+        footer_email = QtWidgets.QLabel("naveenmarupakula5268@gmail.com")
+        footer_email.setStyleSheet("color:#888; font-size:13px;")
+        self.main_layout.addWidget(footer)        
+        self.main_layout.addWidget(footer_name)
+        self.main_layout.addWidget(footer_email)
+
+    def apply_styles(self):
+        self.setStyleSheet("""
+            QDialog { background: #33353a; color: #e6e6e6; }
+            QLabel#headerLabel { font-size:16px; font-weight:600; color:#ffd24d; padding:8px; }
+            QGroupBox { font-weight:600; border:1px solid #47484b; margin-top:8px; padding:8px; }
+            QComboBox, QCheckBox, QPushButton { padding:6px; }
+            QPushButton { background: #4b4f54; border-radius:4px; }
+            QPushButton:hover { background: #5f656b; }
+            QPushButton:pressed { background: #3d4246; }
+        """)
+
+    def create_connections(self):
+        self.color_pick_btn.clicked.connect(lambda: self.pick_color("create"))
+        self.color_swatch.clicked.connect(lambda: self.pick_color("create"))
+        self.mod_color_pick_btn.clicked.connect(lambda: self.pick_color("mod"))
+        self.mod_color_swatch.clicked.connect(lambda: self.pick_color("mod"))
+        self.create_btn.clicked.connect(self.on_create)
+        self.close_btn.clicked.connect(self.close)
+        self.change_shape_btn.clicked.connect(self.on_change_shape)
+        self.change_color_btn.clicked.connect(self.on_change_color)
+
+    def _update_swatch(self, swatch_btn, rgb):
+        r = int(rgb[0]*255); g = int(rgb[1]*255); b = int(rgb[2]*255)
+        swatch_btn.setStyleSheet(f"background-color: rgb({r},{g},{b}); border: 1px solid #222;")
+
+    def pick_color(self, mode):
+        col = QtWidgets.QColorDialog.getColor()
+        if col.isValid():
+            rgb = (col.redF(), col.greenF(), col.blueF())
+            if mode == "create":
+                self._chosen_rgb = rgb
+                self._update_swatch(self.color_swatch, rgb)
+            else:
+                self._mod_rgb = rgb
+                self._update_swatch(self.mod_color_swatch, rgb)
+
+    def on_create(self):
+        sel = cmds.ls(sl=True, type="joint") or []
+        if not sel:
+            cmds.warning("Select joints to create controllers.")
+            return
+        shape_name = self.shape_combo.currentText()
+        rgb = self._chosen_rgb
+        do_parent = self.parent_chk.isChecked()
+        do_scale = self.scale_chk.isChecked()
+        do_fk = self.fk_hierarchy_chk.isChecked()
+        create_ctrl_flag = self.ctrl_chk.isChecked()
+
+        created_entries = []
+        cmds.undoInfo(openChunk=True)
+        try:
+            for joint in sel:
+                main_grp, offset_grp, ctl_tx = build_controller_for_joint(joint, shape_name, rgb)
+                snap_transform_to_target(main_grp, joint)
+                set_rgb_on_shapes(ctl_tx, rgb)
+                if do_parent:
+                    cmds.parentConstraint(ctl_tx, joint, mo=True)
+                if do_scale:
+                    cmds.scaleConstraint(ctl_tx, joint, mo=True)
+                created_entries.append((main_grp, offset_grp, ctl_tx, joint))
+            if do_fk and len(created_entries) > 1:
+                for i in range(1, len(created_entries)):
+                    cmds.parent(created_entries[i][0], created_entries[i-1][2])
+            if create_ctrl_flag:
+                cmds.select([c[2] for c in created_entries])
+        finally:
+            cmds.undoInfo(closeChunk=True)
+
+    def on_change_shape(self):
+        sel = cmds.ls(sl=True, type="transform") or []
+        if not sel:
+            cmds.warning("Select controller transforms to change shape.")
+            return
+        shape_name = self.mod_shape_combo.currentText()
+        cmds.undoInfo(openChunk=True)
+        try:
+            for ctrl in sel:
+                replace_controller_shape(ctrl, shape_name)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+
+    def on_change_color(self):
+        sel = cmds.ls(sl=True, type="transform") or []
+        if not sel:
+            cmds.warning("Select controller transforms to change color.")
+            return
+        rgb = self._mod_rgb
+        cmds.undoInfo(openChunk=True)
+        try:
+            for ctrl in sel:
+                set_rgb_on_shapes(ctrl, rgb)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+
+# ---------------------------
+# Show
+# ---------------------------
+def show_controller_creator_pro():
+    # Delete existing window if it exists
+    if cmds.window("ControllerCreatorProUI", exists=True):
+        cmds.deleteUI("ControllerCreatorProUI", window=True)
+
+    for w in QtWidgets.QApplication.topLevelWidgets():
+        if isinstance(w, ControllerCreatorPro):
+            w.close()
+
+    win = ControllerCreatorPro()
+    win.show()
+    return win
+
+show_controller_creator_pro()
