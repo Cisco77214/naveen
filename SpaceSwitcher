@@ -1,0 +1,158 @@
+import maya.cmds as cmds
+
+WIN = "SpaceSwitcherUI"
+
+def _offset_group(ctrl):
+    """Ensure a driven parent group above the control; return the group."""
+    grp = f"{ctrl}_SPACE_GRP"
+    if not cmds.objExists(grp):
+        parent = cmds.listRelatives(ctrl, p=True)
+        grp = cmds.group(em=True, n=grp)
+        # match transforms
+        m = cmds.xform(ctrl, q=True, m=True, ws=True)
+        cmds.xform(grp, m=m, ws=True)
+        if parent:
+            cmds.parent(grp, parent[0])
+        cmds.parent(ctrl, grp)
+    return grp
+
+def _ensure_enum(ctrl, name, items):
+    """Create/update enum attr with given items on ctrl."""
+    if not cmds.attributeQuery(name, n=ctrl, ex=True):
+        cmds.addAttr(ctrl, ln=name, at="enum", en=":".join(items), k=True)
+    else:
+        # if exists, update items if different
+        cur = cmds.addAttr(f"{ctrl}.{name}", q=True, en=True) or ""
+        if cur.split(":") != items:
+            cmds.addAttr(f"{ctrl}.{name}", e=True, en=":".join(items))
+    return f"{ctrl}.{name}"
+
+def _constraint(ctrl_grp, targets, mode="parent"):
+    """Create constraint from targets to ctrl_grp (no maintain offset)."""
+    if mode == "parent":
+        con = cmds.parentConstraint(targets, ctrl_grp, mo=False)[0]
+    elif mode == "orient":
+        con = cmds.orientConstraint(targets, ctrl_grp, mo=False)[0]
+    else:
+        con = cmds.pointConstraint(targets, ctrl_grp, mo=False)[0]
+    return con
+
+def _drive_weights_by_enum(ctrl, enum_attr, constraint, targets):
+    """Set driven keys so each enum index turns on one weight (one-hot)."""
+    # collect weight attrs in same order as targets
+    wattrs = []
+    for t in targets:
+        # find the exact weight attr name (e.g. parentConstraint1.targetW0)
+        wa = [a for a in cmds.listAttr(constraint, k=True) or []
+              if a.startswith(t.replace("|","").split(":")[-1]) and a.endswith("W0")]  # fallback not reliable
+        # safer: query weightAliasList
+        wmap = cmds.parentConstraint(constraint, q=True, wal=True) if cmds.nodeType(constraint) == "parentConstraint" else None
+        if wmap and t in wmap:
+            idx = wmap.index(t)
+            wa = [cmds.parentConstraint(constraint, q=True, weightAliasList=True)[idx]]
+        else:
+            # generic query
+            wa = cmds.listConnections(t, d=True, s=False, p=True) or []
+        # robust path:
+        aliases = cmds.parentConstraint(constraint, q=True, weightAliasList=True) or \
+                  cmds.orientConstraint(constraint, q=True, weightAliasList=True) or \
+                  cmds.pointConstraint(constraint, q=True, weightAliasList=True)
+        wattrs = aliases
+        break  # we already got the full alias list once
+    if not wattrs:
+        # last resort
+        wattrs = cmds.parentConstraint(constraint, q=True, weightAliasList=True) or \
+                 cmds.orientConstraint(constraint, q=True, weightAliasList=True) or \
+                 cmds.pointConstraint(constraint, q=True, weightAliasList=True)
+
+    # Clear existing SDK on weights
+    for wa in wattrs:
+        try:
+            cmds.cutKey(constraint+"."+wa, cl=True)
+        except:
+            pass
+
+    # One-hot setDrivenKeys
+    for i, wa in enumerate(wattrs):
+        for j, wb in enumerate(wattrs):
+            cmds.setAttr(f"{constraint}.{wb}", 1.0 if i == j else 0.0)
+        cmds.setAttr(enum_attr, i)
+        for wb in wattrs:
+            cmds.setDrivenKeyframe(f"{constraint}.{wb}", cd=enum_attr)
+
+def create_space_switch(control=None, targets=None, mode="parent", include_world=True):
+    """Build a non-popping space switch on control for the given targets."""
+    sel = cmds.ls(sl=True)
+    if control is None or targets is None:
+        if not sel or len(sel) < 2:
+            cmds.error("Select the CONTROL first, then one or more SPACE TARGETS.")
+        control, targets = sel[0], sel[1:]
+
+    # Optional world space target
+    if include_world:
+        if not cmds.objExists("World_Space_LOC"):
+            cmds.spaceLocator(n="World_Space_LOC")
+            cmds.setAttr("World_Space_LOC.v", 0)
+        targets = ["World_Space_LOC"] + targets
+
+    # Build offset group and constraint
+    grp = _offset_group(control)
+    con = _constraint(grp, targets, mode=mode)
+
+    # Enum attribute
+    enum_items = [t.split("|")[-1] for t in targets]
+    enum_attr = _ensure_enum(control, "Space", enum_items)
+
+    # Drive weights with the enum
+    _drive_weights_by_enum(control, enum_attr, con, targets)
+
+    # Convenience button attr (optional)
+    if not cmds.attributeQuery("ApplySpaceSwitch", n=control, ex=True):
+        cmds.addAttr(control, ln="ApplySpaceSwitch", at="bool", k=True)
+        cmds.setAttr(f"{control}.ApplySpaceSwitch", 0)
+
+    cmds.inViewMessage(amg=f"<hl>Space switch created</hl> on <hl>{control}</hl>", pos="midCenter", fade=True)
+    return control, grp, con, enum_attr
+
+def apply_space_switch(control):
+    """Pop-free switch: preserves world pose when you change the enum."""
+    if not cmds.objExists(control):
+        cmds.error("Control not found.")
+    # find the offset group
+    grp = f"{control}_SPACE_GRP"
+    if not cmds.objExists(grp):
+        cmds.error("No SPACE_GRP found for this control.")
+
+    # capture world xform of the control
+    wmat = cmds.xform(control, q=True, m=True, ws=True)
+    # snap the driven group to the control after the enum change,
+    # so the control stays in place (no pop)
+    tmp = cmds.parentConstraint(control, grp, mo=False)
+    cmds.delete(tmp)
+    # re-apply the control’s world matrix to be extra-safe
+    cmds.xform(control, m=wmat, ws=True)
+
+# ---------------- UI ----------------
+def _build_ui():
+    if cmds.window(WIN, q=True, ex=True):
+        cmds.deleteUI(WIN)
+    cmds.window(WIN, t="Space Switcher", s=False)
+    cmds.columnLayout(adj=True, rs=6)
+    cmds.text(l="Select CONTROL first, then SPACE TARGETS", al="center")
+    mode = cmds.optionMenu(l="Mode")
+    for m in ("parent", "orient", "point"):
+        cmds.menuItem(l=m)
+    inc = cmds.checkBox(l="Include World Space", v=True)
+    cmds.button(l="Create Space Switch", bgc=(0.35,0.6,0.35),
+                c=lambda *_: create_space_switch(mode=cmds.optionMenu(mode, q=True, v=True),
+                                                 include_world=cmds.checkBox(inc, q=True, v=True)))
+    cmds.separator(h=6, st="in")
+    cmds.text(l="After changing the Space enum on the control,\nclick to apply pop-free switch:", al="center")
+    ctrl_tf = cmds.textFieldButtonGrp(l="Control", bl="Use Selected",
+                                      bc=lambda *_: cmds.textFieldButtonGrp(ctrl_tf, e=True, text=(cmds.ls(sl=True) or [""])[0]),
+                                      cw3=[50,180,90])
+    cmds.button(l="Apply Switch (no pop)",
+                c=lambda *_: apply_space_switch(cmds.textFieldButtonGrp(ctrl_tf, q=True, text=True)))
+    cmds.showWindow(WIN)
+
+_build_ui()
