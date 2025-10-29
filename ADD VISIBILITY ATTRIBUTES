@@ -1,0 +1,38 @@
+import maya.cmds as cmds
+
+# === MAIN CONTROL ===
+main_ctrl = "Surulval_Root_Ctl"
+
+# === SET NAMES (replace with your actual set names in Maya) ===
+forward_fk_set = "Forward_FK_Set"
+reverse_fk_set = "Reverse_FK_Set"
+ik_set = "IK_Set"
+
+# === ADD VISIBILITY ATTRIBUTES TO MAIN CONTROL ===
+attrs = [("Forward_FK_Vis", 1), ("Reverse_FK_Vis", 1), ("IK_Vis", 1)]
+
+for attr, default in attrs:
+    if not cmds.objExists(f"{main_ctrl}.{attr}"):
+        cmds.addAttr(main_ctrl, ln=attr, at="bool", k=True, dv=default)
+
+# === FUNCTION TO CONNECT VISIBILITY ===
+def connect_visibility(set_name, attr_name):
+    if not cmds.objExists(set_name):
+        cmds.warning(f"⚠ Set '{set_name}' not found — skipping.")
+        return
+
+    members = cmds.sets(set_name, q=True) or []
+    for ctl in members:
+        shapes = cmds.listRelatives(ctl, s=True, ni=True) or []
+        for shape in shapes:
+            # Unlock and connect visibility
+            cmds.setAttr(f"{shape}.visibility", lock=False)
+            if not cmds.isConnected(f"{main_ctrl}.{attr_name}", f"{shape}.visibility"):
+                cmds.connectAttr(f"{main_ctrl}.{attr_name}", f"{shape}.visibility", f=True)
+
+# === CONNECT ALL SETS ===
+connect_visibility(forward_fk_set, "Forward_FK_Vis")
+connect_visibility(reverse_fk_set, "Reverse_FK_Vis")
+connect_visibility(ik_set, "IK_Vis")
+
+print("✅ Visibility control connections created successfully using sets.")
