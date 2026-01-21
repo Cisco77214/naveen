@@ -1,0 +1,521 @@
+#####################################################################################
+# TOOL NAME: Distri-Rig: The Distributed Arc Solver
+# VERSION:   2.5 (Pro)
+# AUTHOR:    Naveen
+#
+# DESCRIPTION:
+# This tool creates a temporary "Distributed Locator" rig on top of any FK chain 
+# (like a tail, spine, rope, or hair). It allows you to animate broad, smooth 
+# arcs using just a few locators, while preserving your original animation.
+# 
+# KEY FEATURES:
+# 1. Non-Destructive: Bakes original animation onto locators so you lose nothing.
+# 2. Variable Resolution: Choose 3, 5, or 10 locators to control 50+ FK bones.
+# 3. Rubber Band Mode: Constrain the Start/End locators to other objects (like Hips/World)
+#    and the middle locators will automatically distribute perfectly between them.
+# 4. Layer Support: Bakes the final result to a new Animation Layer (Override).
+# 5. Visual Guide: Creates a curve to help you see the "Line of Action".
+#
+#####################################################################################
+# HOW TO USE THIS FOR NEW USERS
+#####################################################################################
+#
+# --- PHASE 1: CREATE THE RIG ---
+# 1. Select your FK Controllers in order (e.g., Tail_01 to Tail_20).
+#    (Make sure they have animation if you want to preserve it).
+# 2. Choose "Locator Count" (e.g., 3 or 4 is usually enough for a tail).
+# 3. Click [Create & Bake to Locators].
+#    -> Result: Yellow locators appear. A curve connects them. Your FK controls are now 
+#       constrained to these locators.
+#
+# --- PHASE 2: ANIMATE ---
+# 4. Animate the Yellow Locators. 
+#    - You can rotate them to shape the arc.
+#    - You can move them to stretch the chain.
+#
+#    [OPTIONAL: Rubber Band Mode]
+#    - If you want the tail to stretch between the Hips and a Wall:
+#    - Open Section 3 "CONSTRAIN LOCATORS".
+#    - Load "Hip_Ctrl" into Start Driver.
+#    - Load "Wall_Object" into End Driver.
+#    - Click [Apply Rubber Band Constraint].
+#
+# --- PHASE 3: FINALIZE ---
+# 5. Select your FK Controllers again.
+# 6. Enter a Layer Name (e.g., "Tail_Fix").
+# 7. Click [Bake to Layer & Clean].
+#    -> Result: The locators are deleted. Your FK controls now have the new animation
+#       baked onto a green "Override" animation layer.
+#
+#####################################################################################
+import maya.cmds as cmds
+import maya.mel as mel
+import re
+
+class DistriRigTool:
+    def __init__(self):
+        self.window_name = "DistriRigUI"
+        self.title = "Distri-Rig: Arc Solver"
+        self.loc_grp_name = "DistriRig_Locators_Grp"
+        
+    def create_ui(self):
+        if cmds.window(self.window_name, exists=True):
+            cmds.deleteUI(self.window_name)
+            
+        self.window = cmds.window(self.window_name, title=self.title, widthHeight=(360, 700))
+        
+        # --- Main Scroll Layout ---
+        scroll_layout = cmds.scrollLayout(horizontalScrollBarThickness=16, verticalScrollBarThickness=16)
+        main_layout = cmds.columnLayout(adjustableColumn=True, rowSpacing=8, columnAttach=('both', 10), parent=scroll_layout)
+        
+        # ================= SECTION 1: SETTINGS =================
+        cmds.frameLayout(label="1. SETUP SETTINGS", collapsable=False, bgc=(0.2, 0.2, 0.2), marginWidth=5, marginHeight=5)
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=5)
+        
+        # Locator Count
+        cmds.rowLayout(numberOfColumns=2, adjustableColumn=2)
+        cmds.text(label="Locator Count: ", align='right', width=100)
+        self.loc_count_field = cmds.intField(value=3, minValue=2, step=1)
+        cmds.setParent('..')
+        
+        # Checkboxes
+        cmds.rowLayout(numberOfColumns=3, adjustableColumn=3)
+        self.chk_trans = cmds.checkBox(label="Constrain Translate", value=True)
+        self.chk_rot   = cmds.checkBox(label="Constrain Rotate", value=True)
+        self.chk_curve = cmds.checkBox(label="Visual Guide Curve", value=True)
+        cmds.setParent('..')
+        
+        cmds.setParent('..') # End Frame
+        cmds.separator(height=5, style='none')
+
+        # ================= SECTION 2: CREATE =================
+        cmds.frameLayout(label="2. CREATE RIG", collapsable=False, bgc=(0.2, 0.25, 0.2), marginWidth=5, marginHeight=5)
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=5)
+        
+        cmds.text(label="Select FK Controls -> Click Create", align='center', font="obliqueLabelFont")
+        cmds.button(label="Create & Bake to Locators", command=self.create_setup_safe, height=40, bgc=(0.4, 0.6, 0.4))
+        
+        cmds.setParent('..') # End Frame
+        cmds.separator(height=5, style='none')
+
+        # ================= SECTION 3: DRIVERS =================
+        cmds.frameLayout(label="3. CONSTRAIN LOCATORS (Rubber Band)", collapsable=True, collapse=False, bgc=(0.25, 0.25, 0.3), marginWidth=5, marginHeight=5)
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=5)
+        
+        # Start Driver
+        cmds.rowLayout(numberOfColumns=3, adjustableColumn=2)
+        cmds.text(label="Start:", width=40)
+        self.start_driver_field = cmds.textField(placeholderText="e.g. Main_Ctrl")
+        cmds.button(label="<", width=30, command=lambda x: self.load_sel(self.start_driver_field))
+        cmds.setParent('..')
+        
+        # End Driver
+        cmds.rowLayout(numberOfColumns=3, adjustableColumn=2)
+        cmds.text(label="End:", width=40)
+        self.end_driver_field = cmds.textField(placeholderText="e.g. Hip_Ctrl")
+        cmds.button(label="<", width=30, command=lambda x: self.load_sel(self.end_driver_field))
+        cmds.setParent('..')
+        
+        cmds.button(label="Apply Rubber Band Constraint", command=self.constrain_locators_safe, height=30, bgc=(0.3, 0.4, 0.5))
+        
+        cmds.setParent('..') # End Frame
+        cmds.separator(height=5, style='none')
+
+        # ================= SECTION 3.5: MODIFY (Space Switch) =================
+        cmds.frameLayout(label="3.5 MODIFY LOCATORS (Space Switch)", collapsable=True, collapse=False, bgc=(0.4, 0.3, 0.2), marginWidth=5, marginHeight=5)
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=5)
+        
+        cmds.text(label="Converts Animation seamlessly", align='center', font="obliqueLabelFont")
+        
+        cmds.rowLayout(numberOfColumns=2, adjustableColumn=1, columnWidth2=(150, 150))
+        cmds.button(label="Convert to FK Chain", command=self.make_fk_chain_safe, height=35, bgc=(0.6, 0.5, 0.3), annotation="Fixes double transforms automatically")
+        cmds.button(label="Convert to IK (World)", command=self.remove_fk_chain_safe, height=35, bgc=(0.5, 0.3, 0.3), annotation="Bakes back to World Space")
+        cmds.setParent('..')
+        
+        cmds.setParent('..') # End Frame
+        cmds.separator(height=5, style='none')
+        
+        # ================= SECTION 4: FINALIZE =================
+        cmds.frameLayout(label="4. FINALIZE (BAKE)", collapsable=False, bgc=(0.3, 0.2, 0.2), marginWidth=5, marginHeight=5)
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=5)
+        
+        cmds.rowLayout(numberOfColumns=2, adjustableColumn=2)
+        cmds.text(label="Layer Name: ", width=80)
+        self.layer_name_field = cmds.textField(text="Dist_Bake_Layer")
+        cmds.setParent('..')
+        
+        cmds.button(label="Bake to Layer & Clean", command=self.bake_and_clean_safe, height=40, bgc=(0.6, 0.3, 0.3))
+        cmds.button(label="Delete Setup (Undo/Revert)", command=self.delete_setup_safe, height=30, bgc=(0.3, 0.3, 0.3))
+        
+        cmds.setParent('..') # End Frame
+
+        cmds.showWindow(self.window)
+
+    def load_sel(self, text_field):
+        sel = cmds.ls(sl=True)
+        if sel:
+            cmds.textField(text_field, e=True, text=sel[0])
+
+    # ================= WRAPPERS FOR UNDO SAFETY =================
+    
+    def create_setup_safe(self, *args):
+        cmds.undoInfo(openChunk=True, chunkName="DistIK_Create")
+        try:
+            self.create_setup()
+        except Exception as e:
+            cmds.error(f"DistriRig Error: {e}")
+        finally:
+            cmds.undoInfo(closeChunk=True)
+
+    def constrain_locators_safe(self, *args):
+        cmds.undoInfo(openChunk=True, chunkName="DistIK_Constrain")
+        try:
+            self.constrain_locators_logic()
+        except Exception as e:
+            cmds.error(f"DistriRig Error: {e}")
+        finally:
+            cmds.undoInfo(closeChunk=True)
+            
+    def make_fk_chain_safe(self, *args):
+        cmds.undoInfo(openChunk=True, chunkName="DistIK_MakeFK")
+        try:
+            self.make_fk_chain_logic()
+        except Exception as e:
+            cmds.error(f"DistriRig Error: {e}")
+        finally:
+            cmds.undoInfo(closeChunk=True)
+
+    def remove_fk_chain_safe(self, *args):
+        cmds.undoInfo(openChunk=True, chunkName="DistIK_RemoveFK")
+        try:
+            self.remove_fk_chain_logic()
+        except Exception as e:
+            cmds.error(f"DistriRig Error: {e}")
+        finally:
+            cmds.undoInfo(closeChunk=True)
+
+    def bake_and_clean_safe(self, *args):
+        cmds.undoInfo(openChunk=True, chunkName="DistIK_Bake")
+        try:
+            self.bake_and_clean()
+        except Exception as e:
+            cmds.error(f"DistriRig Error: {e}")
+        finally:
+            cmds.undoInfo(closeChunk=True)
+            
+    def delete_setup_safe(self, *args):
+        cmds.undoInfo(openChunk=True, chunkName="DistIK_Delete")
+        self.delete_setup_only()
+        cmds.undoInfo(closeChunk=True)
+
+    # ================= CORE LOGIC =================
+
+    def create_setup(self, *args):
+        sel = cmds.ls(sl=True)
+        num_locs = cmds.intField(self.loc_count_field, q=True, value=True)
+        do_trans = cmds.checkBox(self.chk_trans, q=True, value=True)
+        do_rot   = cmds.checkBox(self.chk_rot, q=True, value=True)
+        do_curve = cmds.checkBox(self.chk_curve, q=True, value=True)
+
+        if not sel or len(sel) < 2:
+            cmds.warning("Select at least 2 FK controllers.")
+            return
+
+        # Handle Namespace
+        namespace = ""
+        if ":" in sel[0]:
+            namespace = sel[0].rpartition(":")[0] + "_"
+
+        if cmds.objExists(self.loc_grp_name):
+            cmds.delete(self.loc_grp_name)
+            
+        loc_grp = cmds.group(em=True, n=self.loc_grp_name)
+        
+        locators = []
+        temp_constraints = [] 
+        count_ctrls = len(sel)
+        
+        start_frame = cmds.playbackOptions(q=True, min=True)
+        end_frame = cmds.playbackOptions(q=True, max=True)
+
+        print(f"Creating setup with {num_locs} locators...")
+
+        # 1. Create Locators
+        for i in range(num_locs):
+            loc_name = f"{namespace}Loc_{i+1}" 
+            loc = cmds.spaceLocator(n=loc_name)[0]
+            cmds.setAttr(f"{loc}.localScale", 4, 4, 4)
+            cmds.setAttr(f"{loc}.overrideEnabled", 1)
+            cmds.setAttr(f"{loc}.overrideColor", 17) 
+            cmds.parent(loc, loc_grp)
+            locators.append(loc)
+
+            # Distribute Logic
+            t = i / float(num_locs - 1)
+            ctrl_idx_float = t * (count_ctrls - 1)
+            lower_idx = int(ctrl_idx_float)
+            upper_idx = min(lower_idx + 1, count_ctrls - 1)
+            weight = ctrl_idx_float - lower_idx
+
+            # 2. Temp Constraint (FK -> Loc) for baking
+            if lower_idx == upper_idx:
+                 tc = cmds.parentConstraint(sel[lower_idx], loc, mo=False)[0]
+                 temp_constraints.append(tc)
+            else:
+                pc = cmds.pointConstraint(sel[lower_idx], sel[upper_idx], loc, mo=False)[0]
+                targets = cmds.pointConstraint(pc, q=True, weightAliasList=True)
+                cmds.setAttr(f"{pc}.{targets[1]}", weight)
+                cmds.setAttr(f"{pc}.{targets[0]}", 1.0 - weight)
+                oc = cmds.orientConstraint(sel[lower_idx], loc, mo=False)[0]
+                temp_constraints.append(pc)
+                temp_constraints.append(oc)
+
+        # 3. Create Visual Guide Curve
+        if do_curve:
+            pos_list = [cmds.xform(l, q=True, ws=True, t=True) for l in locators]
+            curve = cmds.curve(d=1, p=pos_list, n=f"{namespace}Guide_Curve")
+            cmds.parent(curve, loc_grp)
+            cmds.setAttr(f"{curve}.overrideEnabled", 1)
+            cmds.setAttr(f"{curve}.overrideDisplayType", 2) 
+            
+            for i, loc in enumerate(locators):
+                cl = cmds.cluster(f"{curve}.cv[{i}]", n=f"{namespace}Clst_{i}")
+                cmds.parent(cl[1], loc)
+                cmds.setAttr(f"{cl[1]}.visibility", 0) 
+
+        # 4. Bake Animation to Locators
+        cmds.bakeResults(locators, t=(start_frame, end_frame), simulation=True, disableImplicitControl=True, preserveOutsideKeys=True, minimizeRotation=True)
+
+        # 5. Remove Temp Constraints
+        if temp_constraints:
+            cmds.delete(temp_constraints)
+
+        # 6. Constrain Locators -> FK
+        skip_t = [] if do_trans else ["x","y","z"]
+        skip_r = [] if do_rot else ["x","y","z"]
+
+        for i, ctrl in enumerate(sel):
+            t = i / float(count_ctrls - 1)
+            loc_val = t * (num_locs - 1)
+            span_idx = int(loc_val)
+            if span_idx >= num_locs - 1: span_idx = num_locs - 2
+                
+            loc_A = locators[span_idx]
+            loc_B = locators[span_idx + 1]
+            weight_B = loc_val - span_idx
+            if weight_B > 1.0: weight_B = 1.0
+            if weight_B < 0.0: weight_B = 0.0
+            weight_A = 1.0 - weight_B
+            
+            pc = cmds.parentConstraint(loc_A, loc_B, ctrl, mo=True, skipTranslate=skip_t, skipRotate=skip_r)[0]
+            targets = cmds.parentConstraint(pc, q=True, weightAliasList=True)
+            cmds.setAttr(f"{pc}.{targets[0]}", weight_A)
+            cmds.setAttr(f"{pc}.{targets[1]}", weight_B)
+
+        cmds.select(loc_grp)
+        print("Setup Created. Locators now drive the FK chain.")
+
+    def constrain_locators_logic(self, *args):
+        start_driver = cmds.textField(self.start_driver_field, q=True, text=True)
+        end_driver = cmds.textField(self.end_driver_field, q=True, text=True)
+        
+        if not cmds.objExists(self.loc_grp_name):
+            cmds.warning("Locator Setup not found.")
+            return
+            
+        locs = cmds.listRelatives(self.loc_grp_name, children=True, type="transform") or []
+        locs = [x for x in locs if "Loc" in x] 
+        
+        def natural_keys(text):
+            return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', text)]
+        locs.sort(key=natural_keys)
+        
+        if not locs: return
+            
+        num_locs = len(locs)
+        start_loc = locs[0]
+        end_loc = locs[-1]
+
+        if start_driver and cmds.objExists(start_driver):
+            cmds.parentConstraint(start_driver, start_loc, mo=True)
+        
+        if end_driver and cmds.objExists(end_driver):
+            cmds.parentConstraint(end_driver, end_loc, mo=True)
+
+        if num_locs > 2:
+            for i in range(1, num_locs - 1): 
+                mid_loc = locs[i]
+                factor = float(i) / float(num_locs - 1)
+                
+                pc = cmds.parentConstraint(start_loc, end_loc, mid_loc, mo=True)[0]
+                targets = cmds.parentConstraint(pc, q=True, weightAliasList=True)
+                cmds.setAttr(f"{pc}.{targets[0]}", 1.0 - factor)
+                cmds.setAttr(f"{pc}.{targets[1]}", factor)
+                
+            print(f"Distributed Rubber-Band constraints applied.")
+
+    # ================= FIX FOR DOUBLE TRANSFORM =================
+    def make_fk_chain_logic(self, *args):
+        sel = cmds.ls(sl=True)
+        if not sel or len(sel) < 2:
+            cmds.warning("Select Locators in order (Parent -> Child...).")
+            return
+            
+        print("Converting selection to FK Chain (Rewriting Keys to prevent Double Transform)...")
+        
+        start_frame = cmds.playbackOptions(q=True, min=True)
+        end_frame = cmds.playbackOptions(q=True, max=True)
+
+        # Iterate through list [A, B, C] -> A drives B
+        # We must process them in order so the parent's motion is resolved before we fix the child.
+        for i in range(len(sel) - 1):
+            parent_loc = sel[i]
+            child_loc = sel[i+1]
+            
+            grp_name = f"{child_loc}_FK_Pad"
+            
+            if cmds.objExists(grp_name):
+                print(f"Skipping {child_loc}, already has FK Pad.")
+                continue
+            
+            # 1. SNAPSHOT: Create a temp duplicate to hold the correct World Motion
+            # We duplicate the child, delete its children (shapes/transforms), then re-constrain to child and bake.
+            # Faster way: Just create empty loc and constrain.
+            temp_ref = cmds.spaceLocator(n=f"{child_loc}_TempRef")[0]
+            # Match current frame immediately so it's close
+            cmds.matchTransform(temp_ref, child_loc)
+            # Constrain to Child to track its motion
+            t_const = cmds.parentConstraint(child_loc, temp_ref)[0]
+            # BAKE the temp reference (This is our "Target Truth")
+            cmds.bakeResults(temp_ref, t=(start_frame, end_frame), simulation=True)
+            cmds.delete(t_const) # Now temp_ref acts as a standalone clip player
+
+            # 2. SETUP: Create FK Pad
+            fk_grp = cmds.group(em=True, n=grp_name)
+            cmds.matchTransform(fk_grp, child_loc)
+            
+            if cmds.objExists(self.loc_grp_name):
+                cmds.parent(fk_grp, self.loc_grp_name)
+            
+            # Constrain Pad to Parent
+            cmds.parentConstraint(parent_loc, fk_grp, mo=True)
+            
+            # 3. RE-PARENT: Put Child in Pad
+            # This is where Double Transform usually happens because Child keys + Pad keys = Chaos.
+            cmds.parent(child_loc, fk_grp)
+            
+            # 4. FIX: Constrain Child back to Temp Reference (The "Target Truth")
+            # This forces the Child to ignore its messy local keys and stick to the correct world spot.
+            fix_const = cmds.parentConstraint(temp_ref, child_loc)[0]
+            
+            # 5. BAKE: Burn the new relative keys
+            # Maya calculates: "What local translation do I need inside this moving group to stay at that world spot?"
+            cmds.bakeResults(child_loc, t=(start_frame, end_frame), simulation=True, minimizeRotation=True)
+            
+            # 6. CLEANUP
+            cmds.delete(fix_const)
+            cmds.delete(temp_ref)
+            
+        print("FK Chain created successfully. No double transforms.")
+        cmds.select(sel)
+
+    def remove_fk_chain_logic(self, *args):
+        sel = cmds.ls(sl=True)
+        if not sel:
+            cmds.warning("Select locators to remove from FK.")
+            return
+
+        start_frame = cmds.playbackOptions(q=True, min=True)
+        end_frame = cmds.playbackOptions(q=True, max=True)
+        
+        pads_to_delete = []
+        locs_to_process = []
+
+        print("Removing FK and Baking animation to World...")
+
+        # 1. Identify which selected items are actually in FK mode
+        for loc in sel:
+            parent = cmds.listRelatives(loc, parent=True)
+            if parent and parent[0].endswith("_FK_Pad"):
+                locs_to_process.append(loc)
+                pads_to_delete.append(parent[0])
+
+        if not locs_to_process:
+            cmds.warning("No active FK setup found on selected objects.")
+            return
+
+        # 2. Bake locators to World Space
+        # This converts the complex local motion back into simple World Translate/Rotate keys.
+        cmds.bakeResults(locs_to_process, 
+                         t=(start_frame, end_frame), 
+                         simulation=True, 
+                         disableImplicitControl=True, 
+                         preserveOutsideKeys=True,
+                         minimizeRotation=True)
+
+        # 3. Unparent locators back to main group (or World)
+        if cmds.objExists(self.loc_grp_name):
+            cmds.parent(locs_to_process, self.loc_grp_name)
+        else:
+            cmds.parent(locs_to_process, world=True)
+
+        # 4. Delete the empty FK Pads
+        pads_to_delete = list(set(pads_to_delete))
+        if pads_to_delete:
+            cmds.delete(pads_to_delete)
+
+        print(f"FK removed. Locators are now independent (IK).")
+        cmds.select(locs_to_process)
+
+    def bake_and_clean(self, *args):
+        sel = cmds.ls(sl=True)
+        layer_name = cmds.textField(self.layer_name_field, q=True, text=True)
+        
+        if not sel:
+            cmds.warning("Select FK controllers to bake.")
+            return
+        
+        # Determine Layer Name
+        namespace = ""
+        if ":" in sel[0]:
+            namespace = sel[0].rpartition(":")[0] + "_"
+            if not layer_name.startswith(namespace):
+                layer_name = namespace + layer_name
+
+        if not layer_name: layer_name = "Dist_Bake_Layer"
+
+        start_frame = cmds.playbackOptions(q=True, min=True)
+        end_frame = cmds.playbackOptions(q=True, max=True)
+
+        # 1. Anim Layer
+        if not cmds.objExists(layer_name):
+            cmds.animLayer(layer_name, override=True)
+        
+        print(f"Baking to Layer: {layer_name}...")
+        
+        # 2. Bake
+        cmds.bakeResults(sel, 
+                         t=(start_frame, end_frame), 
+                         simulation=True, 
+                         disableImplicitControl=True, 
+                         preserveOutsideKeys=True, 
+                         minimizeRotation=True,
+                         destinationLayer=layer_name)
+
+        # 3. Clean Constraints
+        for obj in sel:
+            constraints = cmds.listConnections(obj, type="constraint", source=True, destination=False)
+            if constraints:
+                cmds.delete(list(set(constraints)))
+
+        self.delete_setup_only()
+        print("Done.")
+
+    def delete_setup_only(self, *args):
+        if cmds.objExists(self.loc_grp_name):
+            cmds.delete(self.loc_grp_name)
+            print("Setup deleted.")
+
+# Run
+tool = DistriRigTool()
+tool.create_ui()
