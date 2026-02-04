@@ -1,0 +1,152 @@
+##############____BATCH_Mocap_Fbx_cleanup_____################
+import maya.cmds as cmds
+import maya.mel as mel
+import os
+
+class MocapBatchCleanupUI:
+    def __init__(self):
+        self.win = "MocapBatchCleanup"
+        self.src_field = None
+        self.dst_maya_field = None
+        self.dst_fbx_field = None
+        self.progress_bar = None
+
+    def show(self):
+        if cmds.window(self.win, exists=True):
+            cmds.deleteUI(self.win)
+
+        cmds.window(self.win, title="SOT Mocap Batch Cleanup", widthHeight=(480, 600), sizeable=True)
+        cmds.columnLayout(adj=True, rowSpacing=8, columnOffset=["both", 15])
+
+        cmds.text(label="DYNAMIC PREFIX CLEANER", font="boldLabelFont", height=25)
+        cmds.separator(style="in")
+
+        # Paths
+        cmds.text(label="Source Folder (FBX)", align="left")
+        self.src_field = cmds.textField()
+        cmds.button(label="Browse", c=lambda *_: self.browse(self.src_field))
+
+        cmds.text(label="Maya Export (.ma)", align="left")
+        self.dst_maya_field = cmds.textField()
+        cmds.button(label="Browse", c=lambda *_: self.browse(self.dst_maya_field))
+
+        cmds.text(label="FBX Export (.fbx)", align="left")
+        self.dst_fbx_field = cmds.textField()
+        cmds.button(label="Browse", c=lambda *_: self.browse(self.dst_fbx_field))
+
+        cmds.separator(style="in", h=10)
+
+        # Settings
+        self.fps_menu = cmds.optionMenu(label="Frame Rate:")
+        for fps in ["30 fps", "60 fps", "120 fps"]: cmds.menuItem(label=fps)
+        cmds.optionMenu(self.fps_menu, e=True, value="60 fps")
+
+        self.euler_check = cmds.checkBox(label="Apply Euler Filter", value=True)
+        self.delete_markers_check = cmds.checkBox(label="Delete Marker Nulls", value=True)
+        
+        cmds.text(label="Final Standarized Root Name:", align="left")
+        self.rename_prefix = cmds.textField(text="Root")
+
+        self.progress_bar = cmds.progressBar(maxValue=100, width=450, vis=False)
+
+        cmds.button(label="RUN SMART CLEANUP", h=45, bgc=[0.2, 0.5, 0.7], c=self.run_batch)
+        cmds.showWindow(self.win)
+
+    def browse(self, field):
+        path = cmds.fileDialog2(fileMode=3, dialogStyle=2)
+        if path: cmds.textField(field, e=True, text=path[0])
+
+    def auto_detect_and_strip_prefix(self):
+        """Detects unique actor prefix from the Root joint and strips it hierarchy-wide."""
+        all_joints = cmds.ls(type='joint')
+        detected_prefix = None
+
+        # 1. Find the Root and catch the prefix
+        for jnt in all_joints:
+            short_name = jnt.split("|")[-1]
+            if "_Root" in short_name:
+                detected_prefix = short_name.split("Root")[0] # Gets 'Ranjith_'
+                print(f"Detected Actor Prefix: {detected_prefix}")
+                break
+        
+        if not detected_prefix:
+            print("No specific prefix detected. Proceeding with standard names.")
+            return
+
+        # 2. Rename all objects containing this prefix
+        # Sort long names by length (deepest first) to prevent parent-path breakage
+        all_objs = cmds.ls(f"*{detected_prefix}*", long=True)
+        all_objs.sort(key=len, reverse=True)
+
+        for obj in all_objs:
+            full_name = obj.split("|")[-1]
+            new_name = full_name.replace(detected_prefix, "")
+            try:
+                cmds.rename(obj, new_name)
+            except:
+                pass
+
+    def run_batch(self, *_):
+        src = cmds.textField(self.src_field, q=True, text=True)
+        dst_m = cmds.textField(self.dst_maya_field, q=True, text=True)
+        dst_f = cmds.textField(self.dst_fbx_field, q=True, text=True)
+
+        files = [f for f in os.listdir(src) if f.lower().endswith(".fbx")]
+        if not files: return
+
+        cmds.progressBar(self.progress_bar, edit=True, vis=True, maxValue=len(files), progress=0)
+
+        for fbx in files:
+            try:
+                cmds.file(new=True, force=True)
+                cmds.file(os.path.join(src, fbx), i=True, type="FBX")
+                
+                # Dynamic Prefix Removal
+                self.auto_detect_and_strip_prefix()
+                
+                # Final clean for namespaces (just in case)
+                namespaces = [ns for ns in cmds.namespaceInfo(lon=True, r=True) if ns not in ["UI", "shared"]]
+                for ns in sorted(namespaces, key=len, reverse=True):
+                    if cmds.namespace(exists=ns):
+                        cmds.namespace(moveNamespace=[ns, ":"], force=True)
+                        cmds.namespace(removeNamespace=ns)
+
+                # Identify Root for Export
+                all_joints = cmds.ls(type='joint')
+                root_jnt = None
+                for jnt in all_joints:
+                    if jnt.split(":")[-1] == "Root":
+                        root_jnt = jnt
+                        break
+                
+                if root_jnt:
+                    # Parent to world
+                    if cmds.listRelatives(root_jnt, p=True):
+                        try: cmds.parent(root_jnt, w=True)
+                        except: pass
+                    
+                    if cmds.checkBox(self.euler_check, q=True, value=True):
+                        cmds.select(root_jnt, hi=True)
+                        mel.eval("filterCurve")
+
+                # Exports
+                name_base = os.path.splitext(fbx)[0]
+                cmds.file(rename=os.path.join(dst_m, name_base + ".ma"))
+                cmds.file(save=True, type="mayaAscii", force=True)
+
+                if root_jnt:
+                    cmds.select(root_jnt, hi=True)
+                    f_path = os.path.join(dst_f, name_base + ".fbx").replace("\\", "/")
+                    mel.eval('FBXResetExport()')
+                    mel.eval('FBXExportBakeComplexAnimation -v true')
+                    mel.eval('FBXExport -f "{}" -s'.format(f_path))
+
+            except Exception as e:
+                print(f"Error on {fbx}: {e}")
+            
+            cmds.progressBar(self.progress_bar, edit=True, step=1)
+
+        cmds.progressBar(self.progress_bar, edit=True, vis=False)
+        cmds.confirmDialog(title="Done", message="Successfully cleaned all actor prefixes!")
+
+MocapBatchCleanupUI().show()
