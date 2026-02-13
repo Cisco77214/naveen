@@ -1,0 +1,318 @@
+import maya.cmds as cmds
+
+class MetaHumanAutoTransfer:
+    """Auto-detect and transfer MetaHuman root attributes to ARKit blendshapes"""
+    
+    def __init__(self):
+        self.source_root = "root"
+        self.target_mesh = ""
+        self.target_blendshape = ""
+        self.frame_range = [0, 100]
+        self.auto_mapping = self.build_auto_mapping()
+        
+    def build_auto_mapping(self):
+        """Build automatic mapping from MetaHuman CTRL_expressions to ARKit"""
+        return {
+            # JAW
+            "jawOpen": ["CTRL_expressions_jawOpen", "JawOpen"],
+            "jawForward": ["CTRL_expressions_jawFwd", "JawForward"],
+            "jawLeft": ["CTRL_expressions_jawLeft", "JawLeft"],
+            "jawRight": ["CTRL_expressions_jawRight", "JawRight"],
+            
+            # MOUTH - Basic
+            "mouthLeft": ["CTRL_expressions_mouthLeft", "MouthLeft"],
+            "mouthRight": ["CTRL_expressions_mouthRight", "MouthRight"],
+            "mouthClose": ["MouthClose"],
+            
+            # MOUTH - Smile/Frown
+            "mouthSmileLeft": ["CTRL_expressions_mouthCornerPullL", "MouthSmileLeft"],
+            "mouthSmileRight": ["CTRL_expressions_mouthCornerPullR", "MouthSmileRight"],
+            "mouthFrownLeft": ["CTRL_expressions_mouthCornerDepressL", "MouthFrownLeft"],
+            "mouthFrownRight": ["CTRL_expressions_mouthCornerDepressR", "MouthFrownRight"],
+            
+            # MOUTH - Shape
+            "mouthDimpleLeft": ["CTRL_expressions_mouthDimpleL", "MouthDimpleLeft"],
+            "mouthDimpleRight": ["CTRL_expressions_mouthDimpleR", "MouthDimpleRight"],
+            "mouthStretchLeft": ["CTRL_expressions_mouthStretchL", "MouthStretchLeft"],
+            "mouthStretchRight": ["CTRL_expressions_mouthStretchR", "MouthStretchRight"],
+            
+            # MOUTH - Lips
+            "mouthRollLower": ["CTRL_expressions_mouthLowerLipRollOutL", "CTRL_expressions_mouthLowerLipRollOutR", "MouthRollLower"],
+            "mouthRollUpper": ["CTRL_expressions_mouthUpperLipRollOutL", "CTRL_expressions_mouthUpperLipRollOutR", "MouthRollUpper"],
+            "mouthShrugLower": ["CTRL_expressions_jawChinRaiseDL", "CTRL_expressions_jawChinRaiseDR", "MouthShrugLower"],
+            "mouthShrugUpper": ["MouthShrugUpper"],
+            
+            # MOUTH - Advanced
+            "mouthPucker": ["CTRL_expressions_mouthLipsPurseUL", "CTRL_expressions_mouthLipsPurseUR", "CTRL_expressions_mouthLipsPurseDL", "CTRL_expressions_mouthLipsPurseDR", "MouthPucker"],
+            "mouthFunnel": ["CTRL_expressions_mouthFunnelUL", "CTRL_expressions_mouthFunnelUR", "CTRL_expressions_mouthFunnelDL", "CTRL_expressions_mouthFunnelDR", "MouthFunnel"],
+            "mouthPressLeft": ["CTRL_expressions_mouthPressUL", "CTRL_expressions_mouthPressDL", "CTRL_expressions_mouthLipsPressL", "MouthPressLeft"],
+            "mouthPressRight": ["CTRL_expressions_mouthPressUR", "CTRL_expressions_mouthPressDR", "CTRL_expressions_mouthLipsPressR", "MouthPressRight"],
+            
+            # MOUTH - Lip Raise/Depress
+            "mouthUpperUpLeft": ["CTRL_expressions_mouthUpperLipRaiseL", "MouthUpperUpLeft"],
+            "mouthUpperUpRight": ["CTRL_expressions_mouthUpperLipRaiseR", "MouthUpperUpRight"],
+            "mouthLowerDownLeft": ["CTRL_expressions_mouthLowerLipDepressL", "MouthLowerDownLeft"],
+            "mouthLowerDownRight": ["CTRL_expressions_mouthLowerLipDepressR", "MouthLowerDownRight"],
+            
+            # BROWS
+            "browDownLeft": ["CTRL_expressions_browDownL", "BrowDownLeft"],
+            "browDownRight": ["CTRL_expressions_browDownR", "BrowDownRight"],
+            "browInnerUp": ["CTRL_expressions_browRaiseInL", "CTRL_expressions_browRaiseInR", "BrowInnerUp"],
+            "browOuterUpLeft": ["CTRL_expressions_browRaiseOuterL", "BrowOuterUpLeft"],
+            "browOuterUpRight": ["CTRL_expressions_browRaiseOuterR", "BrowOuterUpRight"],
+            
+            # EYES - Blink
+            "eyeBlinkLeft": ["CTRL_expressions_eyeBlinkL", "EyeBlinkLeft"],
+            "eyeBlinkRight": ["CTRL_expressions_eyeBlinkR", "EyeBlinkRight"],
+            
+            # EYES - Expression
+            "eyeSquintLeft": ["CTRL_expressions_eyeSquintInnerL", "EyeSquintLeft"],
+            "eyeSquintRight": ["CTRL_expressions_eyeSquintInnerR", "EyeSquintRight"],
+            "eyeWideLeft": ["CTRL_expressions_eyeWidenL", "CTRL_expressions_eyeLidPressL", "EyeWideLeft"],
+            "eyeWideRight": ["CTRL_expressions_eyeWidenR", "CTRL_expressions_eyeLidPressR", "EyeWideRight"],
+            
+            # EYES - Look
+            "eyeLookUpLeft": ["CTRL_expressions_eyeLookUpL", "EyeLookUpLeft"],
+            "eyeLookUpRight": ["CTRL_expressions_eyeLookUpR", "EyeLookUpRight"],
+            "eyeLookDownLeft": ["CTRL_expressions_eyeLookDownL", "EyeLookDownLeft"],
+            "eyeLookDownRight": ["CTRL_expressions_eyeLookDownR", "EyeLookDownRight"],
+            "eyeLookInLeft": ["CTRL_expressions_eyeLookRightL", "EyeLookInLeft"],
+            "eyeLookInRight": ["CTRL_expressions_eyeLookLeftR", "EyeLookInRight"],
+            "eyeLookOutLeft": ["CTRL_expressions_eyeLookLeftL", "EyeLookOutLeft"],
+            "eyeLookOutRight": ["CTRL_expressions_eyeLookRightR", "EyeLookOutRight"],
+            
+            # CHEEKS
+            "cheekPuff": ["CTRL_expressions_mouthCheekBlowL", "CTRL_expressions_mouthCheekBlowR", "CheekPuff"],
+            "cheekSquintLeft": ["CTRL_expressions_eyeCheekRaiseL", "CheekSquintLeft"],
+            "cheekSquintRight": ["CTRL_expressions_eyeCheekRaiseR", "CheekSquintRight"],
+            
+            # NOSE
+            "noseSneerLeft": ["CTRL_expressions_noseWrinkleUpperL", "CTRL_expressions_noseWrinkleL", "NoseSneerLeft"],
+            "noseSneerRight": ["CTRL_expressions_noseWrinkleUpperR", "CTRL_expressions_noseWrinkleR", "NoseSneerRight"],
+            
+            # TONGUE
+            "tongueOut": ["CTRL_expressions_tongueOut", "TongueOut"],
+        }
+    
+    def set_source_root(self, root_name):
+        """Set the root node name"""
+        if not cmds.objExists(root_name):
+            cmds.warning(f"Root node not found: {root_name}")
+            return False
+        
+        self.source_root = root_name
+        user_attrs = cmds.listAttr(root_name, userDefined=True) or []
+        print(f"Source root: {self.source_root}")
+        print(f"Found {len(user_attrs)} custom attributes")
+        return True
+    
+    def set_target_mesh(self, mesh_name):
+        """Set the target mesh with ARKit blendshapes"""
+        if not cmds.objExists(mesh_name):
+            cmds.warning(f"Target mesh not found: {mesh_name}")
+            return False
+        
+        self.target_mesh = mesh_name
+        history = cmds.listHistory(mesh_name, pruneDagObjects=True)
+        blendshapes = cmds.ls(history, type='blendShape')
+        
+        if not blendshapes:
+            cmds.warning(f"No blendshape node found on {mesh_name}")
+            return False
+        
+        self.target_blendshape = blendshapes[0]
+        print(f"Target mesh: {self.target_mesh}")
+        print(f"Target blendshape: {self.target_blendshape}")
+        return True
+    
+    def set_frame_range(self, start_frame, end_frame):
+        """Set the frame range for transfer"""
+        self.frame_range = [start_frame, end_frame]
+        print(f"Frame range: {start_frame} to {end_frame}")
+    
+    def get_root_value(self, attr_names, frame):
+        """Get average value from multiple root attributes"""
+        cmds.currentTime(frame)
+        total_value = 0.0
+        valid_count = 0
+        
+        for attr_name in attr_names:
+            full_attr = f"{self.source_root}.{attr_name}"
+            if cmds.attributeQuery(attr_name, node=self.source_root, exists=True):
+                try:
+                    value = cmds.getAttr(full_attr)
+                    total_value += value
+                    valid_count += 1
+                except:
+                    pass
+        
+        if valid_count == 0:
+            return 0.0
+        
+        return total_value / valid_count
+    
+    def is_attribute_animated(self, attr_names):
+        """Check if any of the source attributes are animated"""
+        for attr_name in attr_names:
+            full_attr = f"{self.source_root}.{attr_name}"
+            if cmds.attributeQuery(attr_name, node=self.source_root, exists=True):
+                connections = cmds.listConnections(full_attr, source=True, destination=False) or []
+                if connections:
+                    return True
+        return False
+    
+    def transfer_animation(self):
+        """Main transfer function with auto-detection"""
+        if not self.source_root or not self.target_blendshape:
+            cmds.error("Source root or target blendshape not set!")
+            return
+        
+        print("\n" + "="*70)
+        print("MetaHuman AUTO-TRANSFER to ARKit")
+        print("="*70)
+        
+        target_shapes = cmds.listAttr(f"{self.target_blendshape}.weight", multi=True) or []
+        
+        processed_shapes = 0
+        skipped_shapes = 0
+        no_data_shapes = 0
+        total_frames = self.frame_range[1] - self.frame_range[0] + 1
+        
+        for arkit_shape, source_attrs in self.auto_mapping.items():
+            # Check if target has this shape
+            if arkit_shape not in target_shapes:
+                skipped_shapes += 1
+                continue
+            
+            # Check if source has animation
+            if not self.is_attribute_animated(source_attrs):
+                no_data_shapes += 1
+                continue
+            
+            print(f"Transferring: {arkit_shape}")
+            
+            # Transfer frame by frame
+            for frame in range(self.frame_range[0], self.frame_range[1] + 1):
+                source_value = self.get_root_value(source_attrs, frame)
+                final_value = max(0.0, min(1.0, source_value))
+                
+                cmds.setKeyframe(
+                    self.target_blendshape,
+                    attribute=arkit_shape,
+                    value=final_value,
+                    time=frame
+                )
+            
+            processed_shapes += 1
+        
+        print("\n" + "="*70)
+        print("TRANSFER COMPLETE!")
+        print("="*70)
+        print(f"Transferred: {processed_shapes} shapes")
+        print(f"Skipped (not in target): {skipped_shapes} shapes")
+        print(f"Skipped (no animation): {no_data_shapes} shapes")
+        print(f"Total frames: {total_frames}")
+
+
+class MetaHumanAutoTransferUI:
+    def __init__(self):
+        self.window_name = "metaHumanAutoTransfer"
+        self.transfer = MetaHumanAutoTransfer()
+        
+    def create_ui(self):
+        if cmds.window(self.window_name, exists=True):
+            cmds.deleteUI(self.window_name)
+        
+        window = cmds.window(self.window_name, title="MetaHuman Auto Transfer", widthHeight=(500, 350))
+        main_layout = cmds.columnLayout(adjustableColumn=True, rowSpacing=10, columnOffset=["both", 10])
+        
+        cmds.text(label="MetaHuman to ARKit AUTO-TRANSFER", font="boldLabelFont", height=30, backgroundColor=(0.2, 0.4, 0.6))
+        cmds.text(label="No mapping file needed - automatic detection!", height=20)
+        cmds.separator(height=10)
+        
+        cmds.text(label="1. Source Root Node:", align="left", font="boldLabelFont")
+        self.root_field = cmds.textField(text="root", placeholderText="Root node name")
+        cmds.button(label="Set Root", command=self.set_root_cmd)
+        
+        cmds.separator(height=10)
+        
+        cmds.text(label="2. Target ARKit Mesh:", align="left", font="boldLabelFont")
+        cmds.rowLayout(numberOfColumns=2, columnWidth2=(380, 100), adjustableColumn=1)
+        self.target_field = cmds.textField(placeholderText="Select target mesh")
+        cmds.button(label="Set Selected", command=self.set_target_cmd)
+        cmds.setParent('..')
+        
+        cmds.separator(height=10)
+        
+        cmds.text(label="3. Frame Range:", align="left", font="boldLabelFont")
+        cmds.rowLayout(numberOfColumns=4, columnWidth4=(100, 100, 100, 100))
+        cmds.text(label="Start:")
+        self.start_frame = cmds.intField(value=0)
+        cmds.text(label="End:")
+        self.end_frame = cmds.intField(value=100)
+        cmds.setParent('..')
+        cmds.button(label="Use Timeline Range", command=self.use_timeline_range)
+        
+        cmds.separator(height=20)
+        
+        cmds.button(label="AUTO-TRANSFER ANIMATION", height=50, backgroundColor=(0.2, 0.7, 0.3), command=self.transfer_cmd)
+        
+        cmds.separator(height=10)
+        
+        cmds.text(label="Status:", align="left", font="boldLabelFont")
+        self.status_text = cmds.text(label="Ready - no mapping file needed!", align="left", backgroundColor=(0.2, 0.2, 0.2), height=30)
+        
+        cmds.showWindow(window)
+    
+    def set_root_cmd(self, *args):
+        root_name = cmds.textField(self.root_field, query=True, text=True)
+        if self.transfer.set_source_root(root_name):
+            self.update_status(f"Root set: {root_name}", (0.2, 0.6, 0.2))
+        else:
+            self.update_status("Root node not found", (0.6, 0.2, 0.2))
+    
+    def set_target_cmd(self, *args):
+        selection = cmds.ls(selection=True)
+        if not selection:
+            self.update_status("Please select a mesh", (0.6, 0.2, 0.2))
+            return
+        
+        mesh = selection[0]
+        cmds.textField(self.target_field, edit=True, text=mesh)
+        
+        if self.transfer.set_target_mesh(mesh):
+            self.update_status(f"Target set: {mesh}", (0.2, 0.6, 0.2))
+        else:
+            self.update_status("No blendshapes found", (0.6, 0.2, 0.2))
+    
+    def use_timeline_range(self, *args):
+        start = int(cmds.playbackOptions(query=True, minTime=True))
+        end = int(cmds.playbackOptions(query=True, maxTime=True))
+        cmds.intField(self.start_frame, edit=True, value=start)
+        cmds.intField(self.end_frame, edit=True, value=end)
+        self.update_status(f"Timeline: {start}-{end}", (0.2, 0.6, 0.2))
+    
+    def transfer_cmd(self, *args):
+        start = cmds.intField(self.start_frame, query=True, value=True)
+        end = cmds.intField(self.end_frame, query=True, value=True)
+        
+        self.transfer.set_frame_range(start, end)
+        self.update_status("Transferring...", (0.6, 0.6, 0.2))
+        
+        try:
+            self.transfer.transfer_animation()
+            self.update_status("Transfer complete!", (0.2, 0.7, 0.3))
+        except Exception as e:
+            self.update_status(f"Error: {str(e)}", (0.6, 0.2, 0.2))
+            import traceback
+            traceback.print_exc()
+    
+    def update_status(self, message, color):
+        cmds.text(self.status_text, edit=True, label=message, backgroundColor=color)
+
+
+def show_ui():
+    ui = MetaHumanAutoTransferUI()
+    ui.create_ui()
+
+show_ui()
