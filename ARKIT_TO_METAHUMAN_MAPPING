@@ -1,0 +1,166 @@
+import maya.cmds as cmds
+
+# Verified ARKit 52 Mapping for MetaHuman v2 Rig
+ARKIT_TO_METAHUMAN_MAPPING = {
+    'eyeBlinkLeft': ['CTRL_L_eye_blink'],
+    'eyeBlinkRight': ['CTRL_R_eye_blink'],
+    'eyeLookDownLeft': ['CTRL_L_eye'], 
+    'eyeLookDownRight': ['CTRL_R_eye'],
+    'eyeLookInLeft': ['CTRL_L_eye'], 
+    'eyeLookInRight': ['CTRL_R_eye'],
+    'eyeLookOutLeft': ['CTRL_L_eye'],
+    'eyeLookOutRight': ['CTRL_R_eye'],
+    'eyeLookUpLeft': ['CTRL_L_eye'],
+    'eyeLookUpRight': ['CTRL_R_eye'],
+    'eyeSquintLeft': ['CTRL_L_eye_squintInner'],
+    'eyeSquintRight': ['CTRL_R_eye_squintInner'],
+    'eyeWideLeft': ['CTRL_L_eye_eyelidU'],
+    'eyeWideRight': ['CTRL_R_eye_eyelidU'],
+    'jawForward': ['CTRL_C_jaw_fwdBack'],
+    'jawLeft': ['CTRL_C_jaw'], 
+    'jawRight': ['CTRL_C_jaw'], 
+    'jawOpen': ['CTRL_C_jaw'], 
+    'mouthClose': ['CTRL_L_mouth_lipsTogetherU', 'CTRL_R_mouth_lipsTogetherU'],
+    'mouthFunnel': ['CTRL_L_mouth_funnelU', 'CTRL_R_mouth_funnelU', 'CTRL_L_mouth_funnelD', 'CTRL_R_mouth_funnelD'],
+    'mouthPucker': ['CTRL_L_mouth_towardsU', 'CTRL_R_mouth_towardsU', 'CTRL_L_mouth_towardsD', 'CTRL_R_mouth_towardsD'],
+    'mouthLeft': ['CTRL_C_mouth'],
+    'mouthRight': ['CTRL_C_mouth'],
+    'mouthSmileLeft': ['CTRL_L_mouth_cornerPull'],
+    'mouthSmileRight': ['CTRL_R_mouth_cornerPull'],
+    'mouthFrownLeft': ['CTRL_L_mouth_cornerDepress'],
+    'mouthFrownRight': ['CTRL_R_mouth_cornerDepress'],
+    'mouthDimpleLeft': ['CTRL_L_mouth_dimple'],
+    'mouthDimpleRight': ['CTRL_R_mouth_dimple'],
+    'mouthStretchLeft': ['CTRL_L_mouth_stretch'],
+    'mouthStretchRight': ['CTRL_R_mouth_stretch'],
+    'mouthRollLower': ['CTRL_L_mouth_lipsRollD', 'CTRL_R_mouth_lipsRollD'],
+    'mouthRollUpper': ['CTRL_L_mouth_lipsRollU', 'CTRL_R_mouth_lipsRollU'],
+    'mouthShrugLower': ['CTRL_L_jaw_ChinRaiseD', 'CTRL_R_jaw_ChinRaiseD'],
+    'mouthShrugUpper': ['CTRL_L_mouth_upperLipRaise', 'CTRL_R_mouth_upperLipRaise'],
+    'mouthPressLeft': ['CTRL_L_mouth_pressU', 'CTRL_L_mouth_pressD'],
+    'mouthPressRight': ['CTRL_R_mouth_pressU', 'CTRL_R_mouth_pressD'],
+    'mouthLowerDownLeft': ['CTRL_L_mouth_lowerLipDepress'],
+    'mouthLowerDownRight': ['CTRL_R_mouth_lowerLipDepress'],
+    'mouthUpperUpLeft': ['CTRL_L_mouth_upperLipRaise'],
+    'mouthUpperUpRight': ['CTRL_R_mouth_upperLipRaise'],
+    'browDownLeft': ['CTRL_L_brow_down'],
+    'browDownRight': ['CTRL_R_brow_down'],
+    'browInnerUp': ['CTRL_L_brow_raiseIn', 'CTRL_R_brow_raiseIn'],
+    'browOuterUpLeft': ['CTRL_L_brow_raiseOut'],
+    'browOuterUpRight': ['CTRL_R_brow_raiseOut'],
+    'cheekPuff': ['CTRL_L_mouth_suckBlow', 'CTRL_R_mouth_suckBlow'],
+    'cheekSquintLeft': ['CTRL_L_eye_cheekRaise'],
+    'cheekSquintRight': ['CTRL_R_eye_cheekRaise'],
+    'noseSneerLeft': ['CTRL_L_nose_wrinkleUpper'],
+    'noseSneerRight': ['CTRL_R_nose_wrinkleUpper'],
+    'tongueOut': ['CTRL_C_tongue_inOut']
+}
+
+def reset_all_ctrls():
+    """Zeros all transformation attributes on all controllers."""
+    all_ctrls = cmds.ls("CTRL_*", "*:CTRL_*", type="transform")
+    for ctrl in all_ctrls:
+        for attr in ['translateX', 'translateY', 'translateZ', 'rotateX', 'rotateY', 'rotateZ']:
+            try:
+                if cmds.getAttr(f"{ctrl}.{attr}", settable=True):
+                    cmds.setAttr(f"{ctrl}.{attr}", 0)
+            except: pass
+
+def prepare_rig():
+    """Activates the MetaHuman Rig Logic switch so controls deform the mesh."""
+    logic_switch = cmds.ls("*:CTRL_rigLogicSwitch", "CTRL_rigLogicSwitch")
+    if logic_switch:
+        try:
+            cmds.setAttr(f"{logic_switch[0]}.translateY", 1)
+            print("MetaHuman Rig Logic Activated.")
+        except: pass
+
+def set_ctrl_value(ctrl_name, arkit_name):
+    """Applies specific transformation based on ARKit shape needs."""
+    matches = cmds.ls(f"*{ctrl_name}", type="transform")
+    if not matches: return
+    ctrl = matches[0]
+    
+    # Jaw Controls
+    if arkit_name == 'jawOpen':
+        cmds.setAttr(f"{ctrl}.translateY", 1.0) 
+    elif arkit_name == 'jawLeft':
+        cmds.setAttr(f"{ctrl}.translateX", 1.0)
+    elif arkit_name == 'jawRight':
+        cmds.setAttr(f"{ctrl}.translateX", -1.0)
+    elif arkit_name == 'jawForward':
+        cmds.setAttr(f"{ctrl}.translateZ", 1.0)
+        
+    # Eye Directional Controls
+    elif 'LookDown' in arkit_name: cmds.setAttr(f"{ctrl}.translateY", -1.0)
+    elif 'LookUp' in arkit_name: cmds.setAttr(f"{ctrl}.translateY", 1.0)
+    elif 'LookIn' in arkit_name:
+        cmds.setAttr(f"{ctrl}.translateX", 1.0 if 'Left' in arkit_name else -1.0)
+    elif 'LookOut' in arkit_name:
+        cmds.setAttr(f"{ctrl}.translateX", -1.0 if 'Left' in arkit_name else 1.0)
+        
+    # Mouth Directional
+    elif arkit_name == 'mouthLeft': cmds.setAttr(f"{ctrl}.translateX", 1.0)
+    elif arkit_name == 'mouthRight': cmds.setAttr(f"{ctrl}.translateX", -1.0)
+    
+    # All other 1D controls (Blink, Smile, etc.)
+    else:
+        try: cmds.setAttr(f"{ctrl}.translateY", 1.0)
+        except: pass
+
+def run_extraction():
+    # 1. Selection Check
+    mesh_list = cmds.ls(selection=True)
+    if not mesh_list:
+        cmds.error("Please select all face meshes (head, teeth, eyes, lashes, etc.)")
+
+    # 2. Prep Rig and Neutral Base
+    prepare_rig()
+    reset_all_ctrls()
+    cmds.refresh(force=True)
+    
+    # Create Neutral Base Group
+    final_grp = cmds.group(em=True, name="ARKIT_EXTRACTION_RESULTS")
+    base_grp = cmds.group(em=True, name="arkit_neutral_base")
+    for m in mesh_list:
+        dup = cmds.duplicate(m, name=f"base_{m}")[0]
+        cmds.delete(dup, ch=True)
+        cmds.parent(dup, base_grp)
+    cmds.parent(base_grp, final_grp)
+
+    # 3. Snapshot Loop
+    # Temporarily disable evaluation manager for stable snapshots
+    current_mode = cmds.evaluationManager(q=True, mode=True)[0]
+    cmds.evaluationManager(mode="off")
+
+    try:
+        for arkit_name, ctrls in ARKIT_TO_METAHUMAN_MAPPING.items():
+            print(f"Processing Shape: {arkit_name}")
+            reset_all_ctrls()
+            prepare_rig() # Ensure logic stays on
+            
+            for c in ctrls:
+                set_ctrl_value(c, arkit_name)
+            
+            cmds.refresh(force=True)
+            
+            # Create a group for this pose containing all meshes
+            shape_grp = cmds.group(em=True, name=f"arkit_{arkit_name}")
+            for m in mesh_list:
+                dup = cmds.duplicate(m, name=f"{arkit_name}_{m}")[0]
+                cmds.delete(dup, ch=True)
+                cmds.parent(dup, shape_grp)
+            
+            cmds.parent(shape_grp, final_grp)
+            
+    finally:
+        # Restore Evaluation Manager
+        cmds.evaluationManager(mode=current_mode)
+        reset_all_ctrls()
+
+    print("\n--- EXTRACTION COMPLETE ---")
+    print(f"Captured 52 shapes for {len(mesh_list)} meshes.")
+    print("Results are located in the 'ARKIT_EXTRACTION_RESULTS' group.")
+
+if __name__ == "__main__":
+    run_extraction()
