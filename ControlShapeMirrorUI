@@ -1,0 +1,766 @@
+# -*- coding: utf-8 -*-
+"""
+Control Shape Mirror Tool
+==========================
+
+A production style rigging utility for Autodesk Maya that mirrors NURBS
+control curve shapes (CVs) from one control to another, left to right or
+right to left, without touching the target's transform (translate,
+rotate, scale) or animation.
+
+HOW TO USE
+----------
+Paste this entire script into Maya's Script Editor (Python tab) and run it.
+The tool window will open. You can also save it as a .py file on your
+PYTHONPATH / Maya scripts folder and launch it with:
+
+    import control_shape_mirror_tool as csmt
+    csmt.show()
+
+Everything below is a single, self contained script. No third party
+packages are required, only maya.cmds and maya.api.OpenMaya.
+
+Author note: this tool never scales or negates the target's transform.
+It only reads and writes NURBS curve CV data (either as duplicated
+curve shapes, or in place on matching shapes), using Maya's own
+world space transform math (cmds.xform world space queries and sets)
+so rotate order, scale, parent hierarchy, and offset groups are all
+handled correctly by Maya itself.
+"""
+
+import re
+import maya.cmds as cmds
+import maya.api.OpenMaya as om
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+AXIS_INDEX = {"X": 0, "Y": 1, "Z": 2}
+
+DEFAULT_LEFT_TOKENS = ["L_", "l_", "_L_", "_l_", "Left", "left"]
+DEFAULT_RIGHT_TOKENS = ["R_", "r_", "_R_", "_r_", "Right", "right"]
+
+WINDOW_NAME = "controlShapeMirrorToolWindow"
+
+
+# ---------------------------------------------------------------------------
+# Core mirroring logic
+# ---------------------------------------------------------------------------
+
+def validate_control(node):
+    """Check that a node exists and has at least one NURBS curve shape."""
+    if not node or not cmds.objExists(node):
+        return False, "Object does not exist: {0}".format(node)
+    if not get_curve_shapes(node):
+        return False, "Selected object has no NURBS curve shape: {0}".format(node)
+    return True, "OK"
+
+
+def get_curve_shapes(node):
+    """Return every nurbsCurve shape under a transform (or the node itself if it is one)."""
+    if not cmds.objExists(node):
+        return []
+    if cmds.nodeType(node) == "nurbsCurve":
+        return [node]
+    shapes = cmds.listRelatives(node, shapes=True, fullPath=True, type="nurbsCurve") or []
+    # Ignore intermediate (construction history) shapes
+    shapes = [s for s in shapes if not cmds.getAttr(s + ".intermediateObject")]
+    return shapes
+
+
+def mirror_point(point, axis, pivot=0.0):
+    """Reflect a single xyz point across a plane perpendicular to axis at pivot."""
+    p = list(point)
+    idx = AXIS_INDEX[axis.upper()]
+    p[idx] = (2.0 * pivot) - p[idx]
+    return p
+
+
+def get_mirror_matrix(axis, pivot=0.0):
+    """
+    Build a 4x4 reflection matrix across the plane perpendicular to axis,
+    positioned at pivot along that axis. Provided for anyone who wants to
+    do the reflection with a single matrix multiply instead of per point math.
+    """
+    idx = AXIS_INDEX[axis.upper()]
+    m = om.MMatrix()
+    values = list(m)
+    diag_index = idx * 4 + idx
+    values[diag_index] = -1.0
+    mat = om.MMatrix(values)
+    if pivot:
+        # Translate to origin, reflect, translate back
+        offset = [0.0, 0.0, 0.0]
+        offset[idx] = pivot
+        t1 = om.MTransformationMatrix()
+        t1.setTranslation(om.MVector(-offset[0], -offset[1], -offset[2]), om.MSpace.kWorld)
+        t2 = om.MTransformationMatrix()
+        t2.setTranslation(om.MVector(offset[0], offset[1], offset[2]), om.MSpace.kWorld)
+        mat = t1.asMatrix() * mat * t2.asMatrix()
+    return mat
+
+
+def _cv_list(shape):
+    return cmds.ls("{0}.cv[*]".format(shape), flatten=True) or []
+
+
+def get_world_matrix(node):
+    """World matrix of a transform node, read only, never written to."""
+    m = cmds.xform(node, q=True, ws=True, matrix=True)
+    return om.MMatrix(m)
+
+
+def get_shape_cv_local_points(shape):
+    """CV positions in the shape's own local (object) space."""
+    cvs = _cv_list(shape)
+    points = [cmds.xform(cv, q=True, os=True, t=True) for cv in cvs]
+    return cvs, points
+
+
+def set_shape_cv_local_points(shape, points):
+    """
+    Write CV positions in the shape's own local (object) space. This edits only
+    the curve's point data and never touches the transform's translate, rotate
+    or scale attributes.
+    """
+    cvs = _cv_list(shape)
+    if len(cvs) != len(points):
+        raise RuntimeError("CV count mismatch while writing local points to {0}".format(shape))
+    for cv, p in zip(cvs, points):
+        cmds.xform(cv, os=True, t=p)
+
+
+def local_point_to_world(point, world_matrix):
+    mp = om.MPoint(point[0], point[1], point[2]) * world_matrix
+    return [mp.x, mp.y, mp.z]
+
+
+def world_point_to_local(point, world_matrix):
+    inv = world_matrix.inverse()
+    mp = om.MPoint(point[0], point[1], point[2]) * inv
+    return [mp.x, mp.y, mp.z]
+
+
+def mirror_cv_positions_to_target(source_shape, target_transform, axis, pivot=0.0, space="world"):
+    """
+    Core coordinate pipeline, exactly as required:
+
+        Source CV Local Space -> Source World Space -> Mirror Across Axis
+            -> Target Local Space
+
+    Reads the source shape's CVs, converts them to world space using the
+    source transform's world matrix, mirrors them across the chosen axis,
+    then converts the mirrored world points into the TARGET transform's
+    local (object) space using the target's inverse world matrix.
+
+    The target transform itself (translate, rotate, scale, and any parent
+    or offset groups above it) is only ever read here to build its world
+    matrix, and is never modified. The returned points are ready to be
+    written straight onto a target shape's CVs with set_shape_cv_local_points,
+    which lands the mirrored shape exactly at the target's existing location
+    with no offset or displacement.
+
+    space="local" skips the world space round trip entirely and mirrors the
+    source's local points directly, for the rare case where the source and
+    target already sit in perfectly mirrored local frames.
+    """
+    _, local_points = get_shape_cv_local_points(source_shape)
+
+    if space == "local":
+        return [mirror_point(p, axis, pivot) for p in local_points]
+
+    src_transform = cmds.listRelatives(source_shape, parent=True, fullPath=True)[0]
+    src_world_matrix = get_world_matrix(src_transform)
+    tgt_world_matrix = get_world_matrix(target_transform)
+
+    target_local_points = []
+    for p in local_points:
+        world_p = local_point_to_world(p, src_world_matrix)
+        mirrored_world_p = mirror_point(world_p, axis, pivot)
+        target_local_p = world_point_to_local(mirrored_world_p, tgt_world_matrix)
+        target_local_points.append(target_local_p)
+
+    return target_local_points
+
+
+def get_shape_display_settings(shape):
+    """Grab color / override / line width settings from a curve shape."""
+    settings = {}
+    try:
+        settings["overrideEnabled"] = cmds.getAttr(shape + ".overrideEnabled")
+        settings["overrideRGBColors"] = cmds.getAttr(shape + ".overrideRGBColors")
+        settings["overrideColor"] = cmds.getAttr(shape + ".overrideColor")
+        rgb = cmds.getAttr(shape + ".overrideColorRGB")
+        settings["overrideColorRGB"] = rgb[0] if rgb else (0.0, 0.0, 0.0)
+        settings["lineWidth"] = cmds.getAttr(shape + ".lineWidth")
+    except Exception:
+        pass
+    return settings
+
+
+def apply_shape_display_settings(shape, settings):
+    if not settings or not cmds.objExists(shape):
+        return
+    try:
+        if "overrideEnabled" in settings:
+            cmds.setAttr(shape + ".overrideEnabled", settings["overrideEnabled"])
+        if "overrideRGBColors" in settings:
+            cmds.setAttr(shape + ".overrideRGBColors", settings["overrideRGBColors"])
+        if "overrideColor" in settings:
+            cmds.setAttr(shape + ".overrideColor", settings["overrideColor"])
+        if "overrideColorRGB" in settings:
+            r, g, b = settings["overrideColorRGB"]
+            cmds.setAttr(shape + ".overrideColorRGB", r, g, b)
+        if "lineWidth" in settings:
+            cmds.setAttr(shape + ".lineWidth", settings["lineWidth"])
+    except Exception:
+        pass
+
+
+def _mirror_inplace(source, target, src_shapes, axis, pivot, space, preserve_color):
+    """
+    Mirror CVs directly onto existing target shapes, requires matching shape and
+    CV counts. The target transform is read only, to build its world matrix,
+    and is never written to, so the target control stays exactly where it was.
+    """
+    tgt_shapes = get_curve_shapes(target)
+    if not tgt_shapes:
+        return False, "Target has no NURBS curve shape: {0}".format(target), 0
+    if len(src_shapes) != len(tgt_shapes):
+        return False, "Source and target have incompatible curve shapes (shape count mismatch).", 0
+
+    processed = 0
+    for src_shape, tgt_shape in zip(src_shapes, tgt_shapes):
+        src_cvs = _cv_list(src_shape)
+        tgt_cvs = _cv_list(tgt_shape)
+        if len(src_cvs) != len(tgt_cvs):
+            return False, ("Source and target have incompatible curve shapes "
+                            "(CV count mismatch on {0}).".format(tgt_shape)), processed
+
+        # Source local -> source world -> mirror -> target local, using the
+        # target transform's own (unmodified) world matrix.
+        target_local_points = mirror_cv_positions_to_target(src_shape, target, axis, pivot, space)
+        set_shape_cv_local_points(tgt_shape, target_local_points)
+
+        if not preserve_color:
+            apply_shape_display_settings(tgt_shape, get_shape_display_settings(src_shape))
+
+        processed += 1
+
+    return True, "Mirrored {0} shape(s) in place on {1}".format(processed, target), processed
+
+
+def _mirror_replace(source, target, src_shapes, axis, pivot, space, preserve_color, delete_existing):
+    """
+    Rebuild the target's curve shapes from mirrored duplicates of the source shapes.
+    This is used whenever shape counts might not match, or when the user asked to
+    delete/recreate target shapes. It always preserves CV count, degree, form,
+    knots and spans exactly, because each new shape is a real duplicate of the
+    matching source shape.
+    """
+    tgt_shapes_before = get_curve_shapes(target)
+    tgt_color_info = [get_shape_display_settings(s) for s in tgt_shapes_before]
+
+    if delete_existing and tgt_shapes_before:
+        cmds.delete(tgt_shapes_before)
+
+    processed = 0
+    for i, src_shape in enumerate(src_shapes):
+        # 1) Compute the destination points up front, entirely from the source
+        #    shape and the target's CURRENT world matrix. Source local -> source
+        #    world -> mirror -> target local. Target's translate, rotate, scale
+        #    and everything above it in the hierarchy are only read here.
+        target_local_points = mirror_cv_positions_to_target(src_shape, target, axis, pivot, space)
+
+        src_transform = cmds.listRelatives(src_shape, parent=True, fullPath=True)[0]
+
+        # 2) Duplicate the source transform so we get an untouched, independent
+        #    copy of the curve data (same CV count, degree, form, knots, spans).
+        temp = cmds.duplicate(src_transform, renameChildren=True, upstreamNodes=False)[0]
+
+        # Strip out any child transforms (we only want the shape, not child controls).
+        children = cmds.listRelatives(temp, children=True, type="transform", fullPath=True) or []
+        if children:
+            cmds.delete(children)
+
+        temp_shapes = cmds.listRelatives(temp, shapes=True, type="nurbsCurve", fullPath=True) or []
+        if not temp_shapes:
+            cmds.delete(temp)
+            continue
+        temp_shape = temp_shapes[0]
+
+        # 3) Reparent the shape under the target (shape level parenting only,
+        #    this never changes target's own transform attributes).
+        cmds.parent(temp_shape, target, relative=True, shape=True, addObject=True)
+
+        # 4) Clean up the now empty duplicate transform.
+        if cmds.objExists(temp):
+            cmds.delete(temp)
+
+        # The shape has a new name/path after reparenting; find it by taking the
+        # most recently added nurbsCurve shape under target.
+        current_shapes = cmds.listRelatives(target, shapes=True, type="nurbsCurve", fullPath=True) or []
+        new_shape = current_shapes[-1] if current_shapes else None
+
+        if new_shape:
+            # 5) Write the precomputed target-local CV points directly. This is
+            #    the only edit made to the target, its transform is untouched.
+            set_shape_cv_local_points(new_shape, target_local_points)
+
+            if preserve_color and i < len(tgt_color_info) and tgt_color_info[i]:
+                apply_shape_display_settings(new_shape, tgt_color_info[i])
+            elif not preserve_color:
+                apply_shape_display_settings(new_shape, get_shape_display_settings(src_shape))
+
+            short_target = target.split("|")[-1]
+            wanted_name = "{0}Shape".format(short_target) if i == 0 else "{0}Shape{1}".format(short_target, i + 1)
+            try:
+                cmds.rename(new_shape, wanted_name)
+            except Exception:
+                pass
+
+        processed += 1
+
+    return True, "Mirrored {0} shape(s) onto {1}".format(processed, target), processed
+
+
+def mirror_curve_shape(source, target, axis="X", pivot=0.0, space="world",
+                        preserve_color=True, delete_existing=True, create_missing=True):
+    """
+    Mirror every compatible NURBS curve shape from source onto target.
+    Does not touch target's translate, rotate or scale, only its curve shapes.
+    """
+    ok, msg = validate_control(source)
+    if not ok:
+        return False, msg, 0
+
+    src_shapes = get_curve_shapes(source)
+
+    replace_mode = delete_existing or create_missing
+    if replace_mode:
+        return _mirror_replace(source, target, src_shapes, axis, pivot, space,
+                                preserve_color, delete_existing)
+    else:
+        return _mirror_inplace(source, target, src_shapes, axis, pivot, space, preserve_color)
+
+
+# ---------------------------------------------------------------------------
+# Name based pairing
+# ---------------------------------------------------------------------------
+
+def get_opposite_name(name, left_tokens, right_tokens, direction):
+    """
+    Try each (left, right) token pair, in priority order, and return the
+    opposite side name the first time a token is found in `name`.
+    direction is either 'L2R' or 'R2L'.
+    """
+    pairs = list(zip(left_tokens, right_tokens))
+    if direction == "R2L":
+        pairs = [(r, l) for (l, r) in pairs]
+
+    for src_tok, dst_tok in pairs:
+        if not src_tok:
+            continue
+        if src_tok in name:
+            new_name = name.replace(src_tok, dst_tok)
+            if new_name != name:
+                return new_name
+    return None
+
+
+def get_opposite_control(name, direction, left_tokens=None, right_tokens=None):
+    left_tokens = left_tokens or DEFAULT_LEFT_TOKENS
+    right_tokens = right_tokens or DEFAULT_RIGHT_TOKENS
+    return get_opposite_name(name, left_tokens, right_tokens, direction)
+
+
+def build_token_lists(custom_left, custom_right):
+    left_tokens = list(DEFAULT_LEFT_TOKENS)
+    right_tokens = list(DEFAULT_RIGHT_TOKENS)
+    if custom_left and custom_right:
+        left_tokens = [custom_left] + left_tokens
+        right_tokens = [custom_right] + right_tokens
+    return left_tokens, right_tokens
+
+
+# ---------------------------------------------------------------------------
+# Batch runner
+# ---------------------------------------------------------------------------
+
+def mirror_control_shape(pairs, axis="X", pivot=0.0, space="world",
+                          preserve_color=True, delete_existing=True, create_missing=True):
+    """
+    pairs: list of (source, target) tuples. target may be None to represent
+    a name based lookup that failed to find a match, which is reported as
+    "missing" rather than as a hard failure.
+    Returns (summary_dict, results_list). Each result is
+    (status, source, target, message) where status is one of
+    OK, MISSING, FAILED.
+    """
+    results = []
+    successful = 0
+    missing = 0
+    failed = 0
+
+    cmds.undoInfo(openChunk=True)
+    try:
+        for source, target in pairs:
+            if not target or not cmds.objExists(target):
+                missing += 1
+                results.append(("MISSING", source, target, "Target not found."))
+                continue
+
+            ok, msg = validate_control(source)
+            if not ok:
+                failed += 1
+                results.append(("FAILED", source, target, msg))
+                continue
+
+            if source == target:
+                failed += 1
+                results.append(("FAILED", source, target, "Source and target are the same object."))
+                continue
+
+            try:
+                success, message, count = mirror_curve_shape(
+                    source, target, axis=axis, pivot=pivot, space=space,
+                    preserve_color=preserve_color, delete_existing=delete_existing,
+                    create_missing=create_missing)
+                if success:
+                    successful += 1
+                    results.append(("OK", source, target, message))
+                else:
+                    failed += 1
+                    results.append(("FAILED", source, target, message))
+            except Exception as exc:
+                failed += 1
+                results.append(("FAILED", source, target, "Unable to mirror control shape: {0}".format(exc)))
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+    summary = {
+        "processed": len(pairs),
+        "successful": successful,
+        "missing": missing,
+        "failed": failed,
+    }
+    return summary, results
+
+
+# ---------------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------------
+
+class ControlShapeMirrorUI(object):
+
+    def __init__(self):
+        self.window = WINDOW_NAME
+        self.direction = "L2R"
+        self.axis = "X"
+        self.space = "world"
+
+        self.dir_btn_l2r = None
+        self.dir_btn_r2l = None
+        self.axis_btns = {}
+        self.method_radio = None
+        self.tf_source = None
+        self.tf_target = None
+        self.tf_left_token = None
+        self.tf_right_token = None
+        self.cb_preserve_color = None
+        self.cb_delete_existing = None
+        self.cb_create_missing = None
+        self.cb_match_shape = None
+        self.status_field = None
+        self.pivot_field = None
+
+        self.build()
+
+    # ---- window ----
+
+    def build(self):
+        if cmds.window(self.window, exists=True):
+            cmds.deleteUI(self.window)
+
+        cmds.window(self.window, title="Control Shape Mirror Tool", sizeable=True, widthHeight=(380, 560))
+        main = cmds.columnLayout(adjustableColumn=True, rowSpacing=6, columnAttach=("both", 8))
+
+        cmds.text(label="CONTROL SHAPE MIRROR TOOL", font="boldLabelFont", height=28)
+        cmds.separator(height=6, style="in")
+
+        # Mirror method
+        cmds.frameLayout(label="Mirror Method", collapsable=False, marginWidth=6, marginHeight=6)
+        cmds.columnLayout(adjustableColumn=True)
+        self.method_radio = cmds.radioButtonGrp(
+            labelArray2=["Selection Based", "Name Based"], numberOfRadioButtons=2,
+            select=1, columnWidth3=(1, 150, 150))
+        cmds.setParent("..")
+        cmds.setParent("..")
+
+        # Direction
+        cmds.frameLayout(label="Direction", collapsable=False, marginWidth=6, marginHeight=6)
+        row = cmds.rowLayout(numberOfColumns=2, adjustableColumn=1, columnWidth2=(180, 180))
+        self.dir_btn_l2r = cmds.button(label="LEFT -> RIGHT", command=self.on_pick_l2r)
+        self.dir_btn_r2l = cmds.button(label="RIGHT -> LEFT", command=self.on_pick_r2l)
+        cmds.setParent("..")
+        cmds.setParent("..")
+        self._refresh_direction_buttons()
+
+        # Axis
+        cmds.frameLayout(label="Mirror Axis", collapsable=False, marginWidth=6, marginHeight=6)
+        cmds.rowLayout(numberOfColumns=3, adjustableColumn=1, columnWidth3=(120, 120, 120))
+        self.axis_btns["X"] = cmds.button(label="X", command=lambda *a: self.on_pick_axis("X"))
+        self.axis_btns["Y"] = cmds.button(label="Y", command=lambda *a: self.on_pick_axis("Y"))
+        self.axis_btns["Z"] = cmds.button(label="Z", command=lambda *a: self.on_pick_axis("Z"))
+        cmds.setParent("..")
+        cmds.setParent("..")
+        self._refresh_axis_buttons()
+
+        # Source / Target
+        cmds.frameLayout(label="Source / Target (optional explicit pair)", collapsable=False,
+                          marginWidth=6, marginHeight=6)
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+        r1 = cmds.rowLayout(numberOfColumns=3, adjustableColumn=2, columnWidth3=(50, 200, 90))
+        cmds.text(label="Source:")
+        self.tf_source = cmds.textField()
+        cmds.button(label="Load Selected", command=self.on_load_source)
+        cmds.setParent("..")
+        r2 = cmds.rowLayout(numberOfColumns=3, adjustableColumn=2, columnWidth3=(50, 200, 90))
+        cmds.text(label="Target:")
+        self.tf_target = cmds.textField()
+        cmds.button(label="Load Selected", command=self.on_load_target)
+        cmds.setParent("..")
+        cmds.text(label="Leave both empty to use current selection instead.",
+                   align="left", height=18, font="smallObliqueLabelFont")
+        cmds.setParent("..")
+        cmds.setParent("..")
+
+        # Name tokens
+        cmds.frameLayout(label="Custom Name Tokens (optional)", collapsable=False,
+                          marginWidth=6, marginHeight=6)
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+        r3 = cmds.rowLayout(numberOfColumns=2, adjustableColumn=2, columnWidth2=(50, 260))
+        cmds.text(label="Left:")
+        self.tf_left_token = cmds.textField(placeholderText="e.g. L_")
+        cmds.setParent("..")
+        r4 = cmds.rowLayout(numberOfColumns=2, adjustableColumn=2, columnWidth2=(50, 260))
+        cmds.text(label="Right:")
+        self.tf_right_token = cmds.textField(placeholderText="e.g. R_")
+        cmds.setParent("..")
+        cmds.text(label="Built in patterns (L_, l_, _L_, _l_, Left, left, and their\n"
+                        "right side equivalents) are always tried as a fallback.",
+                  align="left", height=32, font="smallObliqueLabelFont")
+        cmds.setParent("..")
+        cmds.setParent("..")
+
+        # Advanced settings
+        cmds.frameLayout(label="Advanced Settings", collapsable=True, collapse=True,
+                          marginWidth=6, marginHeight=6)
+        cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
+
+        rp = cmds.rowLayout(numberOfColumns=2, adjustableColumn=2, columnWidth2=(110, 200))
+        cmds.text(label="Mirror Space:")
+        self.space_radio = cmds.radioButtonGrp(
+            labelArray2=["World", "Local"], numberOfRadioButtons=2, select=1,
+            columnWidth2=(90, 90), changeCommand=self.on_change_space)
+        cmds.setParent("..")
+
+        rpiv = cmds.rowLayout(numberOfColumns=2, adjustableColumn=2, columnWidth2=(110, 120))
+        cmds.text(label="Pivot Offset:")
+        self.pivot_field = cmds.floatField(value=0.0, precision=3)
+        cmds.setParent("..")
+
+        self.cb_preserve_color = cmds.checkBox(label="Preserve Target Color", value=True)
+        self.cb_delete_existing = cmds.checkBox(label="Delete Existing Target Shapes", value=True)
+        self.cb_create_missing = cmds.checkBox(label="Create Missing Target Shape", value=True)
+        self.cb_match_shape = cmds.checkBox(label="Require Matching Shape Count (in place mode)", value=True)
+
+        cmds.setParent("..")
+        cmds.setParent("..")
+
+        cmds.separator(height=6, style="in")
+        cmds.button(label="MIRROR CONTROL SHAPE", height=36, backgroundColor=(0.35, 0.55, 0.35),
+                    command=self.on_mirror)
+
+        cmds.text(label="Status", align="left", font="boldLabelFont")
+        self.status_field = cmds.scrollField(editable=False, wordWrap=True, height=140,
+                                              text="Ready.")
+
+        cmds.showWindow(self.window)
+
+    # ---- state helpers ----
+
+    def _refresh_direction_buttons(self):
+        active = (0.35, 0.55, 0.35)
+        inactive = (0.28, 0.28, 0.28)
+        cmds.button(self.dir_btn_l2r, edit=True,
+                    backgroundColor=active if self.direction == "L2R" else inactive)
+        cmds.button(self.dir_btn_r2l, edit=True,
+                    backgroundColor=active if self.direction == "R2L" else inactive)
+
+    def _refresh_axis_buttons(self):
+        active = (0.35, 0.45, 0.55)
+        inactive = (0.28, 0.28, 0.28)
+        for axis_name, btn in self.axis_btns.items():
+            cmds.button(btn, edit=True, backgroundColor=active if axis_name == self.axis else inactive)
+
+    def on_pick_l2r(self, *args):
+        self.direction = "L2R"
+        self._refresh_direction_buttons()
+
+    def on_pick_r2l(self, *args):
+        self.direction = "R2L"
+        self._refresh_direction_buttons()
+
+    def on_pick_axis(self, axis_name):
+        self.axis = axis_name
+        self._refresh_axis_buttons()
+
+    def on_change_space(self, *args):
+        val = cmds.radioButtonGrp(self.space_radio, q=True, select=True)
+        self.space = "world" if val == 1 else "local"
+
+    def on_load_source(self, *args):
+        sel = cmds.ls(selection=True, long=True)
+        if sel:
+            cmds.textField(self.tf_source, edit=True, text=sel[0])
+
+    def on_load_target(self, *args):
+        sel = cmds.ls(selection=True, long=True)
+        if sel:
+            cmds.textField(self.tf_target, edit=True, text=sel[0])
+
+    def get_method(self):
+        val = cmds.radioButtonGrp(self.method_radio, q=True, select=True)
+        return "selection" if val == 1 else "name"
+
+    def set_status(self, text):
+        cmds.scrollField(self.status_field, edit=True, text=text)
+
+    # ---- main action ----
+
+    def on_mirror(self, *args):
+        axis = self.axis
+        direction = self.direction
+        space = self.space
+        method = self.get_method()
+        pivot = cmds.floatField(self.pivot_field, q=True, value=True)
+
+        preserve_color = cmds.checkBox(self.cb_preserve_color, q=True, value=True)
+        delete_existing = cmds.checkBox(self.cb_delete_existing, q=True, value=True)
+        create_missing = cmds.checkBox(self.cb_create_missing, q=True, value=True)
+
+        left_tok = cmds.textField(self.tf_left_token, q=True, text=True).strip()
+        right_tok = cmds.textField(self.tf_right_token, q=True, text=True).strip()
+        left_tokens, right_tokens = build_token_lists(left_tok, right_tok)
+
+        src_field = cmds.textField(self.tf_source, q=True, text=True).strip()
+        tgt_field = cmds.textField(self.tf_target, q=True, text=True).strip()
+
+        pairs = []
+
+        if src_field and tgt_field:
+            pairs = [(src_field, tgt_field)]
+        else:
+            sel = cmds.ls(selection=True, long=True) or []
+            if not sel:
+                cmds.warning("No controls selected.")
+                self.set_status("No controls selected.")
+                return
+
+            if method == "name":
+                for node in sel:
+                    short_name = node.split("|")[-1]
+                    opposite = get_opposite_control(short_name, direction, left_tokens, right_tokens)
+                    if not opposite:
+                        pairs.append((node, None))
+                        continue
+                    if cmds.objExists(opposite):
+                        pairs.append((node, opposite))
+                    else:
+                        pairs.append((node, None))
+            else:
+                if len(sel) == 2:
+                    pairs = [(sel[0], sel[1])]
+                elif len(sel) > 2:
+                    sel_by_short = {}
+                    for s in sel:
+                        sel_by_short[s.split("|")[-1]] = s
+                    used = set()
+                    for node in sel:
+                        short_name = node.split("|")[-1]
+                        if short_name in used:
+                            continue
+                        opposite_short = get_opposite_control(short_name, direction, left_tokens, right_tokens)
+                        if opposite_short and opposite_short in sel_by_short:
+                            pairs.append((node, sel_by_short[opposite_short]))
+                            used.add(short_name)
+                            used.add(opposite_short)
+                else:
+                    cmds.warning("Select both a source and a target control.")
+                    self.set_status("Select both a source and a target control.")
+                    return
+
+        if not pairs:
+            self.set_status("No valid control pairs found. Check your naming tokens or selection.")
+            return
+
+        if delete_existing:
+            targets_with_shapes = [t for _, t in pairs if t and cmds.objExists(t) and get_curve_shapes(t)]
+            if targets_with_shapes:
+                confirm = cmds.confirmDialog(
+                    title="Confirm Mirror",
+                    message=("This will delete and replace the existing curve shapes on "
+                              "{0} target control(s). Continue?").format(len(targets_with_shapes)),
+                    button=["Continue", "Cancel"], defaultButton="Continue", cancelButton="Cancel",
+                    dismissString="Cancel")
+                if confirm != "Continue":
+                    self.set_status("Mirror cancelled by user.")
+                    return
+
+        summary, results = mirror_control_shape(
+            pairs, axis=axis, pivot=pivot, space=space,
+            preserve_color=preserve_color, delete_existing=delete_existing,
+            create_missing=create_missing)
+
+        self.report(summary, results)
+
+    def report(self, summary, results):
+        lines = []
+        for status, source, target, message in results:
+            if status == "OK":
+                lines.append("OK: {0} -> {1}".format(source, target))
+            elif status == "MISSING":
+                lines.append("Target not found: {0} -> {1}".format(source, target if target else "?"))
+            else:
+                lines.append("FAILED: {0} -> {1} ({2})".format(source, target, message))
+
+        lines.append("")
+        lines.append("Mirror completed.")
+        lines.append("Processed: {0}".format(summary["processed"]))
+        lines.append("Successful: {0}".format(summary["successful"]))
+        lines.append("Missing targets: {0}".format(summary["missing"]))
+        lines.append("Failed: {0}".format(summary["failed"]))
+
+        self.set_status("\n".join(lines))
+
+        if summary["successful"] and not summary["failed"]:
+            cmds.inViewMessage(amg="Mirror completed successfully.", pos="midCenter", fade=True)
+        elif summary["failed"]:
+            cmds.warning("Mirror completed with {0} failure(s). See the tool status log.".format(summary["failed"]))
+
+
+# ---------------------------------------------------------------------------
+# Launcher
+# ---------------------------------------------------------------------------
+
+def show():
+    """Open the Control Shape Mirror Tool window."""
+    ControlShapeMirrorUI()
+
+
+# Auto launch when this file is run directly inside Maya's Script Editor.
+if __name__ == "__main__":
+    show()
